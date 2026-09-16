@@ -28,9 +28,14 @@ if (args.Length == 1 && args[0] == "--theme")
     return await RunThemeChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--files")
+{
+    return await RunFileChecksAsync();
+}
+
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files");
     return 1;
 }
 
@@ -89,6 +94,164 @@ static async Task<int> RunThemeChecksAsync()
     failed |= !await RunCheckAsync("theme-corrupt-config", CheckCorruptThemeConfigAsync);
     failed |= !await RunCheckAsync("theme-cross-window-sse", CheckThemeBroadcastAsync);
     return failed ? 1 : 0;
+}
+
+static async Task<int> RunFileChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("files-command-allowlist", CheckFileCommandAllowlistAsync);
+    failed |= !await RunCheckAsync("files-command-security", CheckFileCommandSecurityAsync);
+    failed |= !await RunCheckAsync("files-save-as-bytes-and-switch", CheckSaveAsBytesAsync);
+    failed |= !await RunCheckAsync("files-new-and-cancel", CheckNewAndCancelAsync);
+    failed |= !await RunCheckAsync("files-modal-lifecycle-hold", CheckModalLifecycleHoldAsync);
+    return failed ? 1 : 0;
+}
+
+static async Task CheckFileCommandAllowlistAsync()
+{
+    var directory = CreateProbeDirectory("file-allowlist");
+    try
+    {
+        var openPath = Path.Combine(directory, "opened.md");
+        var savePath = Path.Combine(directory, "saved.md");
+        var newPath = Path.Combine(directory, "new.md");
+        await File.WriteAllTextAsync(openPath, "# Opened\n");
+        var dialogs = new StubFileDialogs();
+        dialogs.OpenResults.Enqueue(openPath);
+        dialogs.SaveResults.Enqueue(savePath);
+        dialogs.SaveResults.Enqueue(newPath);
+        await using var fixture = await ToggleFixture.CreateAsync("# Current\n", fileDialogs: dialogs);
+        var opened = 0;
+        var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Server.DocumentOpened += _ => opened++;
+        fixture.Server.ExitRequested += () => exited.TrySetResult();
+
+        EnsureStatus((await fixture.CommandAsync("file.open")).StatusCode, HttpStatusCode.NoContent);
+        var save = await fixture.CommandAsync("file.save-as");
+        EnsureStatus(save.StatusCode, HttpStatusCode.OK);
+        Ensure(!string.IsNullOrEmpty(save.DocumentId), "Save As did not return a document ID.");
+        EnsureStatus((await fixture.CommandAsync("file.new")).StatusCode, HttpStatusCode.NoContent);
+        EnsureStatus((await fixture.CommandAsync("file.exit")).StatusCode, HttpStatusCode.NoContent);
+        await exited.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Ensure(opened == 2, "Open and New did not use the document-open path.");
+        Ensure(dialogs.Calls.All(call => call.Directory == Path.GetDirectoryName(fixture.Path)),
+            "A dialog did not default to the current document directory.");
+        Ensure(dialogs.Calls.Count(call => call.Name == Path.GetFileName(fixture.Path)) == 1 &&
+            dialogs.Calls.Count(call => call.Name == "Untitled.md") == 1,
+            "Save As or New did not receive the expected suggested filename.");
+
+        var callsBeforeInvalid = dialogs.TotalCalls;
+        EnsureStatus((await fixture.CommandAsync("file.delete")).StatusCode, HttpStatusCode.BadRequest);
+        EnsureStatus((await fixture.CommandAsync("")).StatusCode, HttpStatusCode.BadRequest);
+        Ensure(dialogs.TotalCalls == callsBeforeInvalid, "Invalid command reached the dialog provider.");
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static async Task CheckFileCommandSecurityAsync()
+{
+    var dialogs = new StubFileDialogs();
+    await using var fixture = await ToggleFixture.CreateAsync("# Protected\n", fileDialogs: dialogs);
+    EnsureStatus((await fixture.CommandAsync("file.open", token: null)).StatusCode, HttpStatusCode.Forbidden);
+    EnsureStatus((await fixture.CommandAsync("file.open", token: "wrong")).StatusCode, HttpStatusCode.Forbidden);
+    EnsureStatus((await fixture.CommandAsync("file.open", origin: null)).StatusCode, HttpStatusCode.Forbidden);
+    EnsureStatus((await fixture.CommandAsync("file.open", origin: "http://127.0.0.1:1")).StatusCode, HttpStatusCode.Forbidden);
+    Ensure(dialogs.TotalCalls == 0, "Rejected request reached the dialog provider.");
+    dialogs.OpenResults.Enqueue(null);
+    EnsureStatus((await fixture.CommandAsync("file.open")).StatusCode, HttpStatusCode.NoContent);
+    Ensure(dialogs.TotalCalls == 1, "Valid command did not reach the dialog provider.");
+
+    var injectedPath = Path.Combine(Path.GetDirectoryName(fixture.Path)!, "request-controlled.md");
+    dialogs.SaveResults.Enqueue(null);
+    var injectedBody = JsonSerializer.Serialize(new
+    {
+        command = "file.new",
+        token = fixture.Token,
+        path = injectedPath,
+        content = "request-controlled"
+    });
+    EnsureStatus((await fixture.CommandRawAsync(injectedBody)).StatusCode, HttpStatusCode.NoContent);
+    Ensure(!File.Exists(injectedPath), "The command request was able to supply a filesystem path or content.");
+}
+
+static async Task CheckSaveAsBytesAsync()
+{
+    var variants = new[]
+    {
+        Encoding.UTF8.GetBytes("a\r\n- [ ] CRLF  \t\r\n"),
+        Encoding.UTF8.GetBytes("a\n- [ ] LF  \t\n"),
+        new byte[] { 0xEF, 0xBB, 0xBF, (byte)'#', (byte)' ', (byte)'B', (byte)'O', (byte)'M', (byte)'\n' }
+    };
+    foreach (var bytes in variants)
+    {
+        var destinationDirectory = CreateProbeDirectory("save-bytes");
+        try
+        {
+            var destinationWithoutExtension = Path.Combine(destinationDirectory, "copy");
+            var destination = destinationWithoutExtension + ".md";
+            var dialogs = new StubFileDialogs();
+            dialogs.SaveResults.Enqueue(destinationWithoutExtension);
+            await using var fixture = await ToggleFixture.CreateAsync(bytes, fileDialogs: dialogs);
+            var response = await fixture.CommandAsync("file.save-as");
+            EnsureStatus(response.StatusCode, HttpStatusCode.OK);
+            Ensure(File.ReadAllBytes(destination).AsSpan().SequenceEqual(bytes), "Save As changed source bytes.");
+            Ensure(!string.IsNullOrEmpty(response.DocumentId) && response.DocumentId != fixture.Id,
+                "Save As did not switch to a new document ID.");
+            Ensure(await fixture.FetchDocumentStatusAsync(response.DocumentId!) == HttpStatusCode.OK,
+                "Saved document ID was not registered.");
+        }
+        finally { TryDeleteDirectory(destinationDirectory); }
+    }
+}
+
+static async Task CheckNewAndCancelAsync()
+{
+    var directory = CreateProbeDirectory("new-cancel");
+    try
+    {
+        var newWithoutExtension = Path.Combine(directory, "empty-note");
+        var dialogs = new StubFileDialogs();
+        dialogs.SaveResults.Enqueue(newWithoutExtension);
+        await using var fixture = await ToggleFixture.CreateAsync("# Existing\n", fileDialogs: dialogs);
+        RegisteredDocument? opened = null;
+        fixture.Server.DocumentOpened += document => opened = document;
+        EnsureStatus((await fixture.CommandAsync("file.new")).StatusCode, HttpStatusCode.NoContent);
+        Ensure(File.Exists(newWithoutExtension + ".md") && new FileInfo(newWithoutExtension + ".md").Length == 0,
+            "New did not create an empty .md file.");
+        Ensure(opened?.Path == newWithoutExtension + ".md", "New did not open the created document.");
+
+        var callsBeforeCancel = dialogs.TotalCalls;
+        dialogs.OpenResults.Enqueue(null);
+        dialogs.SaveResults.Enqueue(null);
+        dialogs.SaveResults.Enqueue(null);
+        EnsureStatus((await fixture.CommandAsync("file.open")).StatusCode, HttpStatusCode.NoContent);
+        EnsureStatus((await fixture.CommandAsync("file.save-as")).StatusCode, HttpStatusCode.NoContent);
+        EnsureStatus((await fixture.CommandAsync("file.new")).StatusCode, HttpStatusCode.NoContent);
+        Ensure(dialogs.TotalCalls == callsBeforeCancel + 3, "Cancel commands were not dispatched exactly once.");
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static async Task CheckModalLifecycleHoldAsync()
+{
+    var dialogs = new StubFileDialogs { Block = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+    dialogs.SaveResults.Enqueue(null);
+    await using var fixture = await ToggleFixture.CreateAsync("# Long dialog\n", fileDialogs: dialogs);
+    var stateDirectory = CreateProbeDirectory("modal-lifecycle");
+    using var coordinator = new InstanceCoordinator(stateDirectory);
+    using var lifecycle = new Lifecycle(fixture.Server, coordinator, new StubBrowserLauncher(),
+        TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(3));
+    var events = await fixture.ConnectEventsAsync();
+    var command = fixture.CommandAsync("file.save-as");
+    await dialogs.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    _ = await fixture.FetchHtmlAsync();
+    await events.DisposeAsync();
+    await Task.Delay(TimeSpan.FromMilliseconds(800));
+    Ensure(!lifecycle.Completion.IsCompleted, "Lifecycle shut down while a simulated long dialog was open.");
+    dialogs.Block.TrySetResult();
+    EnsureStatus((await command).StatusCode, HttpStatusCode.NoContent);
+    await lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(3));
+    TryDeleteDirectory(stateDirectory);
 }
 
 static async Task CheckThemeConfigStoreAsync()
@@ -765,17 +928,20 @@ sealed class ToggleFixture : IAsyncDisposable
     internal string Token { get; }
     internal string Html { get; }
     internal string? ContentSecurityPolicy { get; }
+    internal ReaderServer Server => server;
 
-    internal static Task<ToggleFixture> CreateAsync(string source, ThemeConfigStore? themeConfig = null) =>
-        CreateAsync(Encoding.UTF8.GetBytes(source), themeConfig);
+    internal static Task<ToggleFixture> CreateAsync(string source, ThemeConfigStore? themeConfig = null,
+        IFileDialogProvider? fileDialogs = null) =>
+        CreateAsync(Encoding.UTF8.GetBytes(source), themeConfig, fileDialogs);
 
-    internal static async Task<ToggleFixture> CreateAsync(byte[] source, ThemeConfigStore? themeConfig = null)
+    internal static async Task<ToggleFixture> CreateAsync(byte[] source, ThemeConfigStore? themeConfig = null,
+        IFileDialogProvider? fileDialogs = null)
     {
         var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"mdview-toggle-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
         var path = System.IO.Path.Combine(directory, "fixture.md");
         await File.WriteAllBytesAsync(path, source);
-        var server = new ReaderServer(themeConfig: themeConfig);
+        var server = new ReaderServer(themeConfig: themeConfig, fileDialogs: fileDialogs);
         try
         {
             server.Start();
@@ -830,6 +996,30 @@ sealed class ToggleFixture : IAsyncDisposable
         return response.StatusCode;
     }
 
+    internal Task<CommandResponse> CommandAsync(string command, string? token = "__fixture_token__",
+        string? origin = "__fixture_origin__")
+    {
+        var effectiveToken = token == "__fixture_token__" ? Token : token;
+        return CommandRawAsync(JsonSerializer.Serialize(new { command, token = effectiveToken }), origin);
+    }
+
+    internal async Task<CommandResponse> CommandRawAsync(string json, string? origin = "__fixture_origin__")
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post,
+            $"http://127.0.0.1:{server.Port}/command/{Id}");
+        if (origin is not null)
+            request.Headers.Add("Origin", origin == "__fixture_origin__" ? $"http://127.0.0.1:{server.Port}" : origin);
+        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        using var response = await client.SendAsync(request);
+        string? documentId = null;
+        if (response.Content.Headers.ContentLength is > 0 && response.Content.Headers.ContentType?.MediaType == "application/json")
+        {
+            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            documentId = body.RootElement.TryGetProperty("id", out var id) ? id.GetString() : null;
+        }
+        return new CommandResponse(response.StatusCode, documentId);
+    }
+
     internal async Task<EventStream> ConnectEventsAsync()
     {
         var eventClient = new HttpClient();
@@ -872,12 +1062,47 @@ sealed class ToggleFixture : IAsyncDisposable
         return await response.Content.ReadAsStringAsync();
     }
 
+    internal async Task<HttpStatusCode> FetchDocumentStatusAsync(string id)
+    {
+        using var response = await client.GetAsync($"http://127.0.0.1:{server.Port}/d/{id}");
+        return response.StatusCode;
+    }
+
     public ValueTask DisposeAsync()
     {
         client.Dispose();
         server.Dispose();
         try { Directory.Delete(directory, true); } catch (IOException) { }
         return ValueTask.CompletedTask;
+    }
+}
+
+sealed record CommandResponse(HttpStatusCode StatusCode, string? DocumentId);
+
+sealed class StubFileDialogs : IFileDialogProvider
+{
+    internal Queue<string?> OpenResults { get; } = new();
+    internal Queue<string?> SaveResults { get; } = new();
+    internal List<(string Kind, string Directory, string? Name)> Calls { get; } = new();
+    internal TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal TaskCompletionSource? Block { get; init; }
+    internal int TotalCalls => Calls.Count;
+
+    public async Task<string?> ShowOpenAsync(string initialDirectory, CancellationToken cancellationToken)
+    {
+        Calls.Add(("open", initialDirectory, null));
+        Started.TrySetResult();
+        if (Block is not null) await Block.Task.WaitAsync(cancellationToken);
+        return OpenResults.Dequeue();
+    }
+
+    public async Task<string?> ShowSaveAsAsync(string initialDirectory, string suggestedFileName,
+        CancellationToken cancellationToken)
+    {
+        Calls.Add(("save", initialDirectory, suggestedFileName));
+        Started.TrySetResult();
+        if (Block is not null) await Block.Task.WaitAsync(cancellationToken);
+        return SaveResults.Dequeue();
     }
 }
 

@@ -17,6 +17,7 @@ public sealed class ReaderServer : IDisposable
 
     private readonly DocumentRegistry registry;
     private readonly ThemeConfigStore themeConfig;
+    private readonly IFileDialogProvider? fileDialogs;
     private readonly ConcurrentDictionary<string, Lazy<DocumentWatcher>> watchers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<long, SseClient> clients = new();
     private readonly CancellationTokenSource shutdown = new();
@@ -28,10 +29,12 @@ public sealed class ReaderServer : IDisposable
     private readonly string writeToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(24)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     private readonly ConcurrentDictionary<string, byte[]> suppressedHashes = new(StringComparer.Ordinal);
 
-    public ReaderServer(DocumentRegistry? registry = null, ThemeConfigStore? themeConfig = null)
+    public ReaderServer(DocumentRegistry? registry = null, ThemeConfigStore? themeConfig = null,
+        IFileDialogProvider? fileDialogs = null)
     {
         this.registry = registry ?? new DocumentRegistry();
         this.themeConfig = themeConfig ?? new ThemeConfigStore();
+        this.fileDialogs = fileDialogs;
     }
 
     /// <summary>The loopback TCP port chosen when the listener starts.</summary>
@@ -45,6 +48,10 @@ public sealed class ReaderServer : IDisposable
 
     /// <summary>Raised after POST /open registers a document.</summary>
     public event Action<RegisteredDocument>? DocumentOpened;
+
+    public event Action? ModalCommandStarted;
+    public event Action? ModalCommandCompleted;
+    public event Action? ExitRequested;
 
     /// <summary>Starts the listener, selecting the first available port from 7717 through 7817.</summary>
     public void Start()
@@ -155,6 +162,12 @@ public sealed class ReaderServer : IDisposable
                 return;
             }
 
+            if (context.Request.HttpMethod == "POST" && TryGetDocumentRoute(segments, "command", out document))
+            {
+                await ExecuteCommandAsync(context, document).ConfigureAwait(false);
+                return;
+            }
+
             await WriteNotFoundAsync(context.Response).ConfigureAwait(false);
             context.Response.Close();
         }
@@ -227,8 +240,7 @@ public sealed class ReaderServer : IDisposable
         {
             using var reader = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding ?? Encoding.UTF8);
             var path = await reader.ReadToEndAsync().ConfigureAwait(false);
-            var document = RegisterDocument(path);
-            Notify(DocumentOpened, document);
+            var document = RegisterAndNotify(path);
             var bytes = JsonSerializer.SerializeToUtf8Bytes(new { id = document.Id });
             context.Response.StatusCode = (int)HttpStatusCode.OK;
             context.Response.ContentType = "application/json; charset=utf-8";
@@ -247,6 +259,13 @@ public sealed class ReaderServer : IDisposable
         {
             context.Response.Close();
         }
+    }
+
+    private RegisteredDocument RegisterAndNotify(string path)
+    {
+        var document = RegisterDocument(path);
+        Notify(DocumentOpened, document);
+        return document;
     }
 
     private async Task ToggleAsync(HttpListenerContext context)
@@ -317,6 +336,103 @@ public sealed class ReaderServer : IDisposable
             await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
         }
         finally { context.Response.Close(); }
+    }
+
+    private async Task ExecuteCommandAsync(HttpListenerContext context, RegisteredDocument currentDocument)
+    {
+        var exitRequested = false;
+        try
+        {
+            var origin = context.Request.Headers["Origin"];
+            if (!string.Equals(origin, $"http://127.0.0.1:{Port}", StringComparison.Ordinal))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.Forbidden, "Forbidden").ConfigureAwait(false);
+                return;
+            }
+
+            var request = await JsonSerializer.DeserializeAsync<CommandRequest>(context.Request.InputStream).ConfigureAwait(false);
+            if (request is null || !CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(request.Token ?? string.Empty), Encoding.UTF8.GetBytes(writeToken)))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.Forbidden, "Forbidden").ConfigureAwait(false);
+                return;
+            }
+            if (request.Command is not ("file.open" or "file.save-as" or "file.new" or "file.exit"))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+                return;
+            }
+            if (request.Command == "file.exit")
+            {
+                context.Response.StatusCode = (int)HttpStatusCode.NoContent;
+                exitRequested = true;
+                return;
+            }
+            if (fileDialogs is null)
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.ServiceUnavailable, "File dialogs unavailable.").ConfigureAwait(false);
+                return;
+            }
+
+            Notify(ModalCommandStarted);
+            try
+            {
+                var directory = Path.GetDirectoryName(currentDocument.Path)!;
+                if (request.Command == "file.open")
+                {
+                    var selected = await fileDialogs.ShowOpenAsync(directory, shutdown.Token).ConfigureAwait(false);
+                    if (selected is not null) _ = RegisterAndNotify(NormalizeDialogPath(selected, appendMarkdown: false));
+                    context.Response.StatusCode = (int)HttpStatusCode.NoContent;
+                    return;
+                }
+
+                var suggestedName = request.Command == "file.new" ? "Untitled.md" : Path.GetFileName(currentDocument.Path);
+                var destination = await fileDialogs.ShowSaveAsAsync(directory, suggestedName, shutdown.Token).ConfigureAwait(false);
+                if (destination is null)
+                {
+                    context.Response.StatusCode = (int)HttpStatusCode.NoContent;
+                    return;
+                }
+                destination = NormalizeDialogPath(destination, appendMarkdown: true);
+                if (request.Command == "file.new")
+                {
+                    await File.WriteAllBytesAsync(destination, [], shutdown.Token).ConfigureAwait(false);
+                    _ = RegisterAndNotify(destination);
+                    context.Response.StatusCode = (int)HttpStatusCode.NoContent;
+                    return;
+                }
+
+                if (!string.Equals(currentDocument.Path, destination, StringComparison.OrdinalIgnoreCase))
+                    File.Copy(currentDocument.Path, destination, overwrite: true);
+                var savedDocument = RegisterDocument(destination);
+                var bytes = JsonSerializer.SerializeToUtf8Bytes(new { id = savedDocument.Id });
+                context.Response.StatusCode = (int)HttpStatusCode.OK;
+                context.Response.ContentType = "application/json; charset=utf-8";
+                context.Response.ContentLength64 = bytes.Length;
+                await context.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
+            }
+            finally { Notify(ModalCommandCompleted); }
+        }
+        catch (JsonException)
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is ArgumentException or FileNotFoundException or NotSupportedException)
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Unsupported file selection.").ConfigureAwait(false);
+        }
+        finally
+        {
+            context.Response.Close();
+            if (exitRequested) Notify(ExitRequested);
+        }
+    }
+
+    private static string NormalizeDialogPath(string path, bool appendMarkdown)
+    {
+        if (!Path.IsPathFullyQualified(path)) throw new ArgumentException("Dialog returned a relative path.", nameof(path));
+        var normalized = Path.GetFullPath(path);
+        return appendMarkdown && !Path.HasExtension(normalized) ? normalized + ".md" : normalized;
     }
 
     private async Task ServeEventsAsync(HttpListenerContext context, RegisteredDocument document)
@@ -444,6 +560,10 @@ public sealed class ReaderServer : IDisposable
 
     private sealed record ThemeRequest(
         [property: JsonPropertyName("theme")] string? Theme,
+        [property: JsonPropertyName("token")] string? Token);
+
+    private sealed record CommandRequest(
+        [property: JsonPropertyName("command")] string? Command,
         [property: JsonPropertyName("token")] string? Token);
 
     private sealed record SseMessage(string Event, string Data);

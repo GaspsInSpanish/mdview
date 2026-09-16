@@ -61,9 +61,9 @@ static void ValidateMenuShell(string html)
         Ensure(menuScript.Contains(behavior, StringComparison.Ordinal), $"Menu behavior '{behavior}' was missing.");
     Ensure(!menuScript.Contains("localStorage", StringComparison.Ordinal) &&
         menuScript.Contains("fetch('/theme'", StringComparison.Ordinal) &&
-        !menuScript.Contains("fetch('/open'", StringComparison.Ordinal) &&
-        !menuScript.Contains("fetch('/toggle'", StringComparison.Ordinal),
-        "Menu shell must persist only theme through its assigned endpoint.");
+        menuScript.Contains("fetch(`/command/", StringComparison.Ordinal) &&
+        !menuScript.Contains("command.startsWith('edit.')", StringComparison.Ordinal),
+        "Menu commands were not limited to the assigned Theme and File endpoints.");
 
     var meta = tags.Single(tag => HasAttribute(tag, "http-equiv", "Content-Security-Policy"));
     var policy = GetAttribute(meta, "content") ?? throw new InvalidOperationException("CSP meta had no content.");

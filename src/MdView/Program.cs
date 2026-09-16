@@ -29,7 +29,7 @@ internal static class Program
                 return 1;
             }
 
-            using var server = new ReaderServer();
+            using var server = new ReaderServer(fileDialogs: new NativeFileDialogProvider());
             server.Start();
             var document = server.RegisterDocument(path);
             coordinator.WriteHandshake(server.Port);

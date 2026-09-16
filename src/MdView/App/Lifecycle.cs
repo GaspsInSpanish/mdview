@@ -15,6 +15,7 @@ public sealed class Lifecycle : IDisposable
     private CancellationTokenSource? graceTimer;
     private CancellationTokenSource? startupTimer;
     private int activeClients;
+    private int activeModalCommands;
     private bool clientExpected;
     private bool shuttingDown;
 
@@ -36,6 +37,9 @@ public sealed class Lifecycle : IDisposable
         server.ClientConnected += OnClientConnected;
         server.ClientDisconnected += OnClientDisconnected;
         server.DocumentOpened += OnDocumentOpened;
+        server.ModalCommandStarted += OnModalCommandStarted;
+        server.ModalCommandCompleted += OnModalCommandCompleted;
+        server.ExitRequested += Shutdown;
         ArmStartupGuard();
     }
 
@@ -76,6 +80,9 @@ public sealed class Lifecycle : IDisposable
         server.ClientConnected -= OnClientConnected;
         server.ClientDisconnected -= OnClientDisconnected;
         server.DocumentOpened -= OnDocumentOpened;
+        server.ModalCommandStarted -= OnModalCommandStarted;
+        server.ModalCommandCompleted -= OnModalCommandCompleted;
+        server.ExitRequested -= Shutdown;
         coordinator.DeleteHandshake();
         server.Dispose();
         coordinator.Dispose();
@@ -127,7 +134,32 @@ public sealed class Lifecycle : IDisposable
             }
 
             activeClients--;
-            if (activeClients == 0)
+            if (activeClients == 0 && activeModalCommands == 0)
+            {
+                CancelTimer(ref graceTimer);
+                graceTimer = StartTimer(gracePeriod, GraceExpired);
+            }
+        }
+    }
+
+    private void OnModalCommandStarted()
+    {
+        lock (gate)
+        {
+            if (shuttingDown) return;
+            activeModalCommands++;
+            CancelTimer(ref startupTimer);
+            CancelTimer(ref graceTimer);
+        }
+    }
+
+    private void OnModalCommandCompleted()
+    {
+        lock (gate)
+        {
+            if (shuttingDown || activeModalCommands == 0) return;
+            activeModalCommands--;
+            if (activeModalCommands == 0 && activeClients == 0)
             {
                 CancelTimer(ref graceTimer);
                 graceTimer = StartTimer(gracePeriod, GraceExpired);
@@ -139,7 +171,7 @@ public sealed class Lifecycle : IDisposable
     {
         lock (gate)
         {
-            if (shuttingDown || activeClients != 0 || !clientExpected)
+            if (shuttingDown || activeClients != 0 || activeModalCommands != 0 || !clientExpected)
             {
                 return;
             }
@@ -152,7 +184,7 @@ public sealed class Lifecycle : IDisposable
     {
         lock (gate)
         {
-            if (shuttingDown || activeClients != 0 || clientExpected)
+            if (shuttingDown || activeClients != 0 || activeModalCommands != 0 || clientExpected)
             {
                 return;
             }

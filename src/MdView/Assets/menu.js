@@ -69,6 +69,24 @@
           } finally {
             item.disabled = false;
           }
+        } else if (command.startsWith('file.')) {
+          item.disabled = true;
+          try {
+            const response = await fetch(`/command/${encodeURIComponent(window.mdviewToggle.id)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ command, token: window.mdviewToggle.token })
+            });
+            if (!response.ok) throw new Error('File command failed.');
+            if (command === 'file.save-as' && response.status === 200) {
+              const result = await response.json();
+              location.assign(`/d/${encodeURIComponent(result.id)}`);
+            }
+          } catch {
+            alert('The file command could not be completed.');
+          } finally {
+            item.disabled = false;
+          }
         }
         closeMenu(true);
       });
