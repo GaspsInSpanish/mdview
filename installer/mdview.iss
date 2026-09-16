@@ -8,6 +8,7 @@ AppId={{7B6BF47B-8EA5-4F15-87C7-A7FF2B61A1D4}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=GaspsInSpanish
+AppMutex=Local\mdview-singleton
 DefaultDirName={localappdata}\Programs\mdview
 DefaultGroupName=mdview
 DisableProgramGroupPage=yes

@@ -1,6 +1,11 @@
 using System.Net;
+using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading.Channels;
 using MdView.App;
+using MdView.Rendering;
 using MdView.Serving;
 
 if (args.Length == 2 && args[0] == "--lifecycle")
@@ -8,9 +13,14 @@ if (args.Length == 2 && args[0] == "--lifecycle")
     return await RunLifecycleChecksAsync(Path.GetFullPath(args[1]));
 }
 
+if (args.Length == 1 && args[0] == "--toggle")
+{
+    return await RunToggleChecksAsync();
+}
+
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md>");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle");
     return 1;
 }
 
@@ -33,6 +43,194 @@ using (var server = new ReaderServer())
 }
 
 return 0;
+
+static async Task<int> RunToggleChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("basic-toggle-both-directions", CheckBasicToggleAsync);
+    failed |= !await RunCheckAsync("line-endings-bom-whitespace", CheckPreservationAsync);
+    failed |= !await RunCheckAsync("indentation-and-ordered-items", CheckListFormsAsync);
+    failed |= !await RunCheckAsync("stale-state-conflict", CheckStaleStateAsync);
+    failed |= !await RunCheckAsync("code-block-and-prose-immunity", CheckImmunityAsync);
+    failed |= !await RunCheckAsync("token-enforcement", CheckTokenEnforcementAsync);
+    failed |= !await RunCheckAsync("echo-suppression-and-external-reload", CheckEchoSuppressionAsync);
+    failed |= !await RunCheckAsync("one-based-line-numbers", CheckLineNumbersAsync);
+    failed |= !await RunCheckAsync("uri-sanitizer-regression", CheckUriSanitizerAsync);
+    return failed ? 1 : 0;
+}
+
+static async Task<bool> RunCheckAsync(string name, Func<Task> check)
+{
+    try
+    {
+        await check();
+        Console.WriteLine($"{name}=passed");
+        return true;
+    }
+    catch (Exception exception)
+    {
+        Console.WriteLine($"{name}=failed detail={SingleLine(exception.Message)}");
+        return false;
+    }
+}
+
+static string SingleLine(string value) => value.Replace('\r', ' ').Replace('\n', ' ');
+
+static async Task CheckBasicToggleAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("- [ ] basic\n");
+    EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.NoContent);
+    EnsureBytes(fixture.Path, "- [x] basic\n");
+    EnsureStatus(await fixture.ToggleAsync(1, true), HttpStatusCode.NoContent);
+    EnsureBytes(fixture.Path, "- [ ] basic\n");
+}
+
+static async Task CheckPreservationAsync()
+{
+    var bom = Encoding.UTF8.GetPreamble();
+    var crlfBody = Encoding.UTF8.GetBytes("heading\r\n- [ ] preserve me  \t\r\nlast\r\n");
+    await using (var fixture = await ToggleFixture.CreateAsync([.. bom, .. crlfBody]))
+    {
+        var before = File.ReadAllBytes(fixture.Path);
+        EnsureLineEndings(before, expectedCrlf: 3, expectedBareLf: 0);
+        EnsureStatus(await fixture.ToggleAsync(2, false), HttpStatusCode.NoContent);
+        var after = File.ReadAllBytes(fixture.Path);
+        Ensure(after.AsSpan(0, bom.Length).SequenceEqual(bom), "UTF-8 BOM was not preserved.");
+        EnsureLineEndings(after, expectedCrlf: 3, expectedBareLf: 0);
+        Ensure(after.AsSpan().SequenceEqual(ReplaceAscii(before, "[ ]", "[x]")),
+            "CRLF/BOM fixture changed bytes other than the task marker.");
+    }
+
+    await using (var fixture = await ToggleFixture.CreateAsync("heading\n- [ ] preserve me  \t\nlast\n"))
+    {
+        var before = File.ReadAllBytes(fixture.Path);
+        EnsureLineEndings(before, expectedCrlf: 0, expectedBareLf: 3);
+        EnsureStatus(await fixture.ToggleAsync(2, false), HttpStatusCode.NoContent);
+        var after = File.ReadAllBytes(fixture.Path);
+        EnsureLineEndings(after, expectedCrlf: 0, expectedBareLf: 3);
+        Ensure(after.AsSpan().SequenceEqual(ReplaceAscii(before, "[ ]", "[x]")),
+            "LF fixture changed bytes other than the task marker.");
+    }
+}
+
+static async Task CheckListFormsAsync()
+{
+    const string source = "- parent\n  - [ ] nested  \n1. [ ] ordered \t\n";
+    await using var fixture = await ToggleFixture.CreateAsync(source);
+    EnsureStatus(await fixture.ToggleAsync(2, false), HttpStatusCode.NoContent);
+    EnsureStatus(await fixture.ToggleAsync(3, false), HttpStatusCode.NoContent);
+    EnsureBytes(fixture.Path, "- parent\n  - [x] nested  \n1. [x] ordered \t\n");
+}
+
+static async Task CheckStaleStateAsync()
+{
+    const string source = "- [x] already checked\n";
+    await using var fixture = await ToggleFixture.CreateAsync(source);
+    var before = File.ReadAllBytes(fixture.Path);
+    EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.Conflict);
+    Ensure(File.ReadAllBytes(fixture.Path).AsSpan().SequenceEqual(before), "Stale request modified the file.");
+    EnsureStatus(await fixture.ToggleAsync(1, true), HttpStatusCode.NoContent);
+    EnsureBytes(fixture.Path, "- [ ] already checked\n");
+}
+
+static async Task CheckImmunityAsync()
+{
+    const string source = "```text\n- [ ] fenced\n```\nordinary [ ] prose\n- [ ] legitimate\n";
+    await using var fixture = await ToggleFixture.CreateAsync(source);
+    Ensure(!fixture.Html.Contains("data-line=\"2\"", StringComparison.Ordinal) &&
+        !fixture.Html.Contains("data-line=\"4\"", StringComparison.Ordinal),
+        "Fenced code or prose rendered as a clickable input.");
+    Ensure(fixture.Html.Contains("data-line=\"5\"", StringComparison.Ordinal),
+        "Legitimate task item did not render as a clickable input.");
+    var before = File.ReadAllBytes(fixture.Path);
+    EnsureStatus(await fixture.ToggleAsync(2, false), HttpStatusCode.Conflict);
+    EnsureStatus(await fixture.ToggleAsync(4, false), HttpStatusCode.Conflict);
+    Ensure(File.ReadAllBytes(fixture.Path).AsSpan().SequenceEqual(before), "Hostile request modified a non-task line.");
+    EnsureStatus(await fixture.ToggleAsync(5, false), HttpStatusCode.NoContent);
+    EnsureBytes(fixture.Path, "```text\n- [ ] fenced\n```\nordinary [ ] prose\n- [x] legitimate\n");
+}
+
+static async Task CheckTokenEnforcementAsync()
+{
+    const string source = "- [ ] protected\n";
+    await using var fixture = await ToggleFixture.CreateAsync(source);
+    var before = File.ReadAllBytes(fixture.Path);
+    EnsureStatus(await fixture.ToggleAsync(1, false, token: null), HttpStatusCode.Forbidden);
+    EnsureStatus(await fixture.ToggleAsync(1, false, token: "wrong-token"), HttpStatusCode.Forbidden);
+    Ensure(File.ReadAllBytes(fixture.Path).AsSpan().SequenceEqual(before), "Rejected token request modified the file.");
+    EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.NoContent);
+    EnsureBytes(fixture.Path, "- [x] protected\n");
+}
+
+static async Task CheckEchoSuppressionAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("- [ ] watched\n");
+    await using var events = await fixture.ConnectEventsAsync();
+    EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.NoContent);
+    Ensure(!await events.HasReloadAsync(TimeSpan.FromSeconds(2)), "Toggle produced an echo reload event.");
+
+    await File.AppendAllTextAsync(fixture.Path, "external edit\n", new UTF8Encoding(false));
+    Ensure(await events.HasReloadAsync(TimeSpan.FromSeconds(8)), "External write did not produce a reload event.");
+}
+
+static Task CheckLineNumbersAsync()
+{
+    const string source = "heading\n\n- [ ] third line\n- [ ] fourth line\n";
+    var html = Renderer.RenderDocument(DocumentKind.Markdown, source, "lines", "document", "token");
+    Ensure(html.Contains("data-line=\"3\"", StringComparison.Ordinal), "Renderer did not emit 1-based line 3.");
+    Ensure(html.Contains("data-line=\"4\"", StringComparison.Ordinal), "Renderer did not emit 1-based line 4.");
+    return CheckLineNumberEndpointAsync(source);
+}
+
+static async Task CheckLineNumberEndpointAsync(string source)
+{
+    await using var fixture = await ToggleFixture.CreateAsync(source);
+    EnsureStatus(await fixture.ToggleAsync(3, false), HttpStatusCode.NoContent);
+    EnsureBytes(fixture.Path, "heading\n\n- [x] third line\n- [ ] fourth line\n");
+}
+
+static Task CheckUriSanitizerAsync()
+{
+    var html = Renderer.RenderDocument("[safe](https://example.com) [bad](javascript:alert(1))", "uris");
+    Ensure(html.Contains("href=\"https://example.com\"", StringComparison.Ordinal), "Safe URI was removed.");
+    Ensure(!Regex.IsMatch(html, "(?:href|src)\\s*=\\s*[\\\"']?javascript:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+        "Unsafe javascript URI survived in an HTML attribute.");
+    return Task.CompletedTask;
+}
+
+static void EnsureStatus(HttpStatusCode actual, HttpStatusCode expected) =>
+    Ensure(actual == expected, $"Expected HTTP {(int)expected}, received {(int)actual}.");
+
+static void EnsureBytes(string path, string expected) =>
+    Ensure(File.ReadAllBytes(path).AsSpan().SequenceEqual(Encoding.UTF8.GetBytes(expected)), "File bytes did not match expected content.");
+
+static void EnsureLineEndings(byte[] bytes, int expectedCrlf, int expectedBareLf)
+{
+    var crlf = 0;
+    var bareLf = 0;
+    for (var i = 0; i < bytes.Length; i++)
+    {
+        if (bytes[i] != (byte)'\n') continue;
+        if (i > 0 && bytes[i - 1] == (byte)'\r') crlf++; else bareLf++;
+    }
+    Ensure(crlf == expectedCrlf && bareLf == expectedBareLf,
+        $"Expected CRLF={expectedCrlf}/bare-LF={expectedBareLf}, got CRLF={crlf}/bare-LF={bareLf}.");
+}
+
+static byte[] ReplaceAscii(byte[] bytes, string oldValue, string newValue)
+{
+    var result = bytes.ToArray();
+    var oldBytes = Encoding.ASCII.GetBytes(oldValue);
+    var index = result.AsSpan().IndexOf(oldBytes);
+    Ensure(index >= 0, $"Fixture did not contain {oldValue}.");
+    Encoding.ASCII.GetBytes(newValue).CopyTo(result, index);
+    return result;
+}
+
+static void Ensure(bool condition, string message)
+{
+    if (!condition) throw new InvalidOperationException(message);
+}
 
 static async Task<int> RunLifecycleChecksAsync(string path)
 {
@@ -219,5 +417,174 @@ sealed class OwnedResponse(HttpResponseMessage response, HttpClient client) : Ht
             client.Dispose();
         }
         base.Dispose(disposing);
+    }
+}
+
+sealed class ToggleFixture : IAsyncDisposable
+{
+    private static readonly Regex ToggleConfiguration = new(
+        "window\\.mdviewToggle=\\{id:(?<id>\\\"(?:[^\\\"\\\\]|\\\\.)*\\\"),token:(?<token>\\\"(?:[^\\\"\\\\]|\\\\.)*\\\")\\};",
+        RegexOptions.CultureInvariant);
+
+    private readonly string directory;
+    private readonly ReaderServer server;
+    private readonly HttpClient client = new();
+
+    private ToggleFixture(string directory, string path, ReaderServer server, string id, string token, string html)
+    {
+        this.directory = directory;
+        this.server = server;
+        Path = path;
+        Id = id;
+        Token = token;
+        Html = html;
+    }
+
+    internal string Path { get; }
+    internal string Id { get; }
+    internal string Token { get; }
+    internal string Html { get; }
+
+    internal static Task<ToggleFixture> CreateAsync(string source) =>
+        CreateAsync(Encoding.UTF8.GetBytes(source));
+
+    internal static async Task<ToggleFixture> CreateAsync(byte[] source)
+    {
+        var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"mdview-toggle-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var path = System.IO.Path.Combine(directory, "fixture.md");
+        await File.WriteAllBytesAsync(path, source);
+        var server = new ReaderServer();
+        try
+        {
+            server.Start();
+            var document = server.RegisterDocument(path);
+            using var client = new HttpClient();
+            var html = await client.GetStringAsync($"http://127.0.0.1:{server.Port}/d/{document.Id}");
+            var match = ToggleConfiguration.Match(html);
+            if (!match.Success) throw new InvalidOperationException("Rendered document did not expose toggle configuration.");
+            var renderedId = JsonSerializer.Deserialize<string>(match.Groups["id"].Value);
+            var token = JsonSerializer.Deserialize<string>(match.Groups["token"].Value);
+            if (renderedId != document.Id || string.IsNullOrEmpty(token))
+                throw new InvalidOperationException("Rendered toggle configuration was invalid.");
+            return new ToggleFixture(directory, path, server, document.Id, token, html);
+        }
+        catch
+        {
+            server.Dispose();
+            try { Directory.Delete(directory, true); } catch (IOException) { }
+            throw;
+        }
+    }
+
+    internal async Task<HttpStatusCode> ToggleAsync(int line, bool expectedChecked, string? token = "__fixture_token__")
+    {
+        var effectiveToken = token == "__fixture_token__" ? Token : token;
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{server.Port}/toggle");
+        request.Headers.Add("Origin", $"http://127.0.0.1:{server.Port}");
+        request.Content = JsonContent.Create(new { id = Id, line, @checked = expectedChecked, token = effectiveToken });
+        using var response = await client.SendAsync(request);
+        return response.StatusCode;
+    }
+
+    internal async Task<EventStream> ConnectEventsAsync()
+    {
+        var eventClient = new HttpClient();
+        try
+        {
+            var response = await eventClient.SendAsync(
+                new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{server.Port}/events/{Id}"),
+                HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            var stream = await response.Content.ReadAsStreamAsync();
+            var reader = new StreamReader(stream, Encoding.UTF8);
+            var firstLine = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            if (firstLine != ": connected")
+            {
+                response.Dispose();
+                eventClient.Dispose();
+                throw new InvalidOperationException("SSE connection did not send its connected comment.");
+            }
+            _ = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            return new EventStream(eventClient, response, reader);
+        }
+        catch
+        {
+            eventClient.Dispose();
+            throw;
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        client.Dispose();
+        server.Dispose();
+        try { Directory.Delete(directory, true); } catch (IOException) { }
+        return ValueTask.CompletedTask;
+    }
+}
+
+sealed class EventStream : IAsyncDisposable
+{
+    private readonly HttpClient client;
+    private readonly HttpResponseMessage response;
+    private readonly StreamReader reader;
+    private readonly Channel<bool> reloads = Channel.CreateUnbounded<bool>();
+    private readonly Task readPump;
+    private volatile bool stopping;
+
+    internal EventStream(HttpClient client, HttpResponseMessage response, StreamReader reader)
+    {
+        this.client = client;
+        this.response = response;
+        this.reader = reader;
+        readPump = ReadEventsAsync();
+    }
+
+    internal async Task<bool> HasReloadAsync(TimeSpan timeout)
+    {
+        using var cancellation = new CancellationTokenSource(timeout);
+        try
+        {
+            if (!await reloads.Reader.WaitToReadAsync(cancellation.Token))
+                throw new IOException("SSE stream ended before the assertion completed.");
+            return reloads.Reader.TryRead(out _);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            if (readPump.IsCompleted) await reloads.Reader.Completion;
+            return false;
+        }
+    }
+
+    private async Task ReadEventsAsync()
+    {
+        try
+        {
+            while (true)
+            {
+                var line = await reader.ReadLineAsync();
+                if (line is null)
+                    throw new IOException("SSE stream closed unexpectedly.");
+                if (line == "event: reload") reloads.Writer.TryWrite(true);
+            }
+        }
+        catch (Exception) when (stopping)
+        {
+            reloads.Writer.TryComplete();
+        }
+        catch (Exception exception)
+        {
+            reloads.Writer.TryComplete(exception);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        stopping = true;
+        response.Dispose();
+        reader.Dispose();
+        client.Dispose();
+        await readPump.ConfigureAwait(false);
     }
 }

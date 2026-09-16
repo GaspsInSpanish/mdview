@@ -2,6 +2,19 @@
 
 mdview is a small Windows reading utility: double-click a Markdown file and it opens in a focused, Claude-artifact-style Brave window that reloads when the file changes.
 
+
+## Clickable checkboxes
+
+GFM task lists are interactive. Clicking a checkbox toggles `[ ]` / `[x]` **in the
+source file** — the file is the source of truth, so the change survives a reload and
+shows up in git.
+
+mdview is otherwise still a reader: toggling an existing checkbox is the only thing it
+will ever write. If the file changed underneath (say you also have it open in an
+editor), the click is refused and the page reloads rather than overwriting your edit.
+Line endings, indentation, trailing whitespace, and BOM are preserved byte-for-byte,
+so a toggle in a CRLF file doesn't produce a whole-file diff.
+
 ## Install
 
 Download the installer from GitHub Releases and run it. The installer is intentionally unsigned, so Windows SmartScreen will initially show **Windows protected your PC**. Click **More info**, then **Run anyway**. This is expected for the unsigned v1 installer.

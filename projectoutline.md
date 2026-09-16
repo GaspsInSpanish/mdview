@@ -18,8 +18,16 @@ Installed from a GitHub Releases installer.
 This is a deliberate release boundary, not an oversight — do not implement other
 formats ahead of it.
 
-**Non-goals.** No editing. No file browser or sidebar. No tabs. No cloud, account, or
-telemetry. No Markdown dialect beyond CommonMark + GFM.
+**Non-goals.** No general editing — no text cursor, no free-form modification, no
+file browser or sidebar, no tabs, no cloud, account, or telemetry. No Markdown
+dialect beyond CommonMark + GFM.
+
+**One deliberate exception (v1.1):** clicking a GFM task-list checkbox toggles
+`[ ]` ↔ `[x]` in the source file. This is a knowing, scoped reversal of the original
+"does not edit" rule — see the §5 decision-log entry for the reasoning and the line
+that replaced it. The boundary is now: *mdview may toggle an existing checkbox, and
+may change nothing else.* Any proposal to edit anything beyond that is a new
+architecture decision, not an extension of this one.
 
 ### Why not an off-the-shelf option
 
@@ -162,9 +170,43 @@ association, single-instance forwarding, and uninstall cleanliness.
 | 2026-09-15 | `WinExe` not `Exe` | `Exe` flashes a console window on every double-click |
 | 2026-09-15 | `PublishTrimmed=false` | Markdig + `HttpListener` reflection vs a few MB — bad trade |
 | 2026-09-15 | Installer built by GitHub Actions on `windows-latest` | Inno Setup is Windows-only; also sidesteps cross-building from WSL |
+| 2026-09-16 | Checkboxes become clickable and **write back to the file**, reversing "no editing" | A visual-only toggle was rejected as dishonest: the file would still say `[ ]` and the next live-reload would silently revert every tick. Between "not interactive" and "interactive and truthful", the user chose truthful. Scope is deliberately drawn at *toggling an existing checkbox* so this doesn't become a wedge for general editing. Consequence accepted: the threat model changes from read-only to read-write, mitigated by a write token + `Origin` check (§7) |
 | 2026-09-15 | v1 ships `.md` only; more formats post-v1 | User decision. A `DocumentKind` seam goes in at S2 so later formats are an addition, not a refactor of the registry/server/installer together |
 
 ---
+
+## 7. Write-back protocol (v1.1)
+
+The only write path in the product. Treat every rule here as load-bearing.
+
+**Locating the checkbox.** Markdig's precise source location gives each task item its
+line number; the renderer emits `data-line` on the `<input>`. Never match on text
+content — duplicate items are common, and a `[ ]` appearing in ordinary prose or
+inside a fenced code block must never be toggled.
+
+**Toggle request.** `POST /toggle` with document id, line number, the state the client
+believed it was in, and the write token.
+
+**Verify before writing.** Re-read the file and confirm the target line still parses as
+a task item in the expected state. If it doesn't, the file changed underneath — return
+409 and let the page reload rather than clobbering someone's edit. This is what makes
+it safe to have the file open in an editor at the same time.
+
+**Preserve everything else.** Toggle the single marker character. Line endings
+(CRLF vs LF), indentation, trailing whitespace, BOM, and encoding must survive
+byte-identical. A tool that silently rewrites every line ending of a CRLF file
+produces a catastrophic spurious diff — on Windows this is the default case, not an
+edge case.
+
+**Suppress the echo, without going blind.** Our own write trips the watcher. Suppress
+by comparing the post-write content hash to what we just wrote, *not* by blanket
+time-window muting — a window would also swallow a genuine external edit that happens
+to land inside it.
+
+**Write token.** Without one, any local process could POST to the loopback port and
+silently modify files the user has open. A random per-process token embedded in the
+page, plus an `Origin` check, keeps the write path reachable only from our own page.
+The document id alone is not sufficient: it is visible in the browser's URL.
 
 ## 6. Roadmap — post-v1
 

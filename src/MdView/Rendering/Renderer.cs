@@ -33,14 +33,14 @@ public static class Renderer
         => RenderDocument(DocumentKind.Markdown, markdown, title);
 
     /// <summary>Renders a supported document format as a complete, self-contained HTML5 document.</summary>
-    public static string RenderDocument(DocumentKind kind, string document, string title)
+    public static string RenderDocument(DocumentKind kind, string document, string title, string documentId = "", string writeToken = "")
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(title);
 
         var body = kind switch
         {
-            DocumentKind.Markdown => MarkdownRenderer.RenderBody(document),
+            DocumentKind.Markdown => MarkdownRenderer.RenderBody(document, documentId),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported document kind.")
         };
         var html = new StringBuilder();
@@ -58,6 +58,10 @@ public static class Renderer
         html.AppendLine("<main>");
         html.Append(body);
         html.AppendLine("</main>");
+        html.AppendLine("<script>");
+        html.Append("window.mdviewToggle={id:").Append(System.Text.Json.JsonSerializer.Serialize(documentId)).Append(",token:").Append(System.Text.Json.JsonSerializer.Serialize(writeToken)).AppendLine("};");
+        html.AppendLine("document.addEventListener('change',async e=>{const b=e.target;if(!b.matches('input[data-line]'))return;const old=!b.checked;b.disabled=true;try{const r=await fetch('/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:window.mdviewToggle.id,line:+b.dataset.line,checked:old,token:window.mdviewToggle.token})});if(r.status===409){location.reload();return;}if(!r.ok)throw 0;}catch{b.checked=old;alert('Checkbox change was not saved.');}finally{b.disabled=false;}});");
+        html.AppendLine("</script>");
 
         foreach (var script in HighlightScripts)
         {

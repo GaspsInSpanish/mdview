@@ -2,7 +2,9 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
+using System.Security.Cryptography;
 using MdView.Rendering;
 
 namespace MdView.Serving;
@@ -22,6 +24,8 @@ public sealed class ReaderServer : IDisposable
     private Task? acceptLoop;
     private long nextClientId;
     private bool disposed;
+    private readonly string writeToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(24)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    private readonly ConcurrentDictionary<string, byte[]> suppressedHashes = new(StringComparer.Ordinal);
 
     public ReaderServer(DocumentRegistry? registry = null)
     {
@@ -137,6 +141,12 @@ public sealed class ReaderServer : IDisposable
                 return;
             }
 
+            if (context.Request.HttpMethod == "POST" && segments.Length == 1 && segments[0] == "toggle")
+            {
+                await ToggleAsync(context).ConfigureAwait(false);
+                return;
+            }
+
             await WriteNotFoundAsync(context.Response).ConfigureAwait(false);
             context.Response.Close();
         }
@@ -186,7 +196,7 @@ public sealed class ReaderServer : IDisposable
                 return;
             }
 
-            var html = Renderer.RenderDocument(document.Kind, source, document.Title);
+            var html = Renderer.RenderDocument(document.Kind, source, document.Title, document.Id, writeToken);
             var bytes = Encoding.UTF8.GetBytes(html);
             context.Response.StatusCode = (int)HttpStatusCode.OK;
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -225,6 +235,41 @@ public sealed class ReaderServer : IDisposable
         {
             context.Response.Close();
         }
+    }
+
+    private async Task ToggleAsync(HttpListenerContext context)
+    {
+        try
+        {
+            var origin = context.Request.Headers["Origin"];
+            if (!string.Equals(origin, $"http://127.0.0.1:{Port}", StringComparison.Ordinal))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.Forbidden, "Forbidden").ConfigureAwait(false);
+                return;
+            }
+
+            var request = await JsonSerializer.DeserializeAsync<ToggleRequest>(context.Request.InputStream).ConfigureAwait(false);
+            if (request is null || !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(request.Token ?? string.Empty), Encoding.UTF8.GetBytes(writeToken)) ||
+                !registry.TryGet(request.Id ?? string.Empty, out var document))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.Forbidden, "Forbidden").ConfigureAwait(false);
+                return;
+            }
+
+            if (!TaskToggleService.TryToggle(document.Path, request.Line, request.Checked, out var hash))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.Conflict, "Conflict").ConfigureAwait(false);
+                return;
+            }
+
+            suppressedHashes[document.Id] = hash;
+            context.Response.StatusCode = (int)HttpStatusCode.NoContent;
+        }
+        catch (JsonException)
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+        }
+        finally { context.Response.Close(); }
     }
 
     private async Task ServeEventsAsync(HttpListenerContext context, RegisteredDocument document)
@@ -317,6 +362,16 @@ public sealed class ReaderServer : IDisposable
 
     private Task BroadcastReloadAsync(string documentId)
     {
+        if (suppressedHashes.TryGetValue(documentId, out var expected))
+        {
+            if (registry.TryGet(documentId, out var document) && File.Exists(document.Path) &&
+                CryptographicOperations.FixedTimeEquals(expected, SHA256.HashData(File.ReadAllBytes(document.Path))))
+            {
+                suppressedHashes.TryRemove(documentId, out _);
+                return Task.CompletedTask;
+            }
+            suppressedHashes.TryRemove(documentId, out _);
+        }
         foreach (var client in clients.Values)
         {
             if (client.DocumentId == documentId)
@@ -327,6 +382,12 @@ public sealed class ReaderServer : IDisposable
 
         return Task.CompletedTask;
     }
+
+    private sealed record ToggleRequest(
+        [property: JsonPropertyName("id")] string? Id,
+        [property: JsonPropertyName("line")] int Line,
+        [property: JsonPropertyName("checked")] bool Checked,
+        [property: JsonPropertyName("token")] string? Token);
 
     private static async Task<string?> ReadDocumentAsync(string path)
     {
