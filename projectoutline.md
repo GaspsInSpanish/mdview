@@ -137,9 +137,12 @@ a stock theme whose palette fights the page.
 | **S3** | `BraveLauncher` + `InstanceCoordinator` + `Lifecycle` shutdown | **High** — state machine + process lifecycle (Standard §6) |
 | **S4** | Inno Setup installer, `.md` association, GitHub Actions release pipeline | Medium |
 
-**All four stages complete and accepted as of 2026-09-15.** Everything provable on
-Linux has been independently re-run in the PM shell. What remains is a Windows
-verification pass — see README and the handoff checklist.
+**v1.0.0 shipped 2026-09-16.** All four stages accepted; everything provable on Linux
+re-run independently in the PM shell. The release pipeline has now run for real —
+Inno Setup compilation and the Releases upload are verified, with the published
+checksum confirmed against the published binary. What remains unverified is only what
+requires actually installing on Windows: Brave discovery, `MessageBoxW`, the `.md`
+association, single-instance forwarding, and uninstall cleanliness.
 
 ## 4a. Known residuals — accepted, not forgotten
 
