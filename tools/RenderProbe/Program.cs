@@ -75,16 +75,99 @@ static void ValidateMenuShell(string html)
     var css = Assets.LoadTheme();
     Ensure(Regex.IsMatch(css, @"main\s*\{[^}]*max-width:\s*46rem", RegexOptions.CultureInvariant),
         "The reading column no longer has a 46rem measure.");
+    ValidateBevelTheme(css, dark: false);
+    ValidateBevelTheme(css, dark: true);
+    ValidatePressedBevel(css);
     foreach (Match rule in Regex.Matches(css, @"(?<selectors>[^{}]+)\{(?<declarations>[^{}]*)\}", RegexOptions.CultureInvariant))
     {
         if (!rule.Groups["selectors"].Value.Contains(".menu", StringComparison.Ordinal)) continue;
         var declarations = rule.Groups["declarations"].Value;
         Ensure(!declarations.Contains("border-radius", StringComparison.OrdinalIgnoreCase),
             "A menu rule uses border-radius.");
-        Ensure(!declarations.Contains("box-shadow", StringComparison.OrdinalIgnoreCase),
-            "A menu rule uses box-shadow.");
+        Ensure(!declarations.Contains("transition", StringComparison.OrdinalIgnoreCase),
+            "A menu rule uses a transition.");
+        foreach (Match shadow in Regex.Matches(declarations, @"box-shadow\s*:\s*(?<value>[^;]+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            ValidateHardInsetShadows(shadow.Groups["value"].Value);
     }
 }
+
+static void ValidateBevelTheme(string css, bool dark)
+{
+    var blockPattern = dark
+        ? @"@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root\s*\{(?<tokens>[^}]*)\}"
+        : @"^\s*:root\s*\{(?<tokens>[^}]*)\}";
+    var block = Regex.Match(css, blockPattern, RegexOptions.CultureInvariant).Groups["tokens"].Value;
+    Ensure(block.Length > 0, $"{(dark ? "Dark" : "Light")} theme token block was missing.");
+    var names = new[] { "--bevel-hi-outer", "--bevel-hi-inner", "--bevel-face", "--bevel-lo-inner", "--bevel-lo-outer" };
+    var colors = names.Select(name => ReadHexToken(block, name)).ToArray();
+    var luminances = colors.Select(RelativeLuminance).ToArray();
+    for (var index = 1; index < luminances.Length; index++)
+        Ensure(luminances[index - 1] > luminances[index],
+            $"{(dark ? "Dark" : "Light")} bevel tones are not ordered lightest to darkest.");
+
+    var highlightContrast = ContrastRatio(luminances[2], luminances[0]);
+    var shadowContrast = ContrastRatio(luminances[2], luminances[4]);
+    Ensure(highlightContrast > 1.7, $"Face-to-outer-highlight contrast was only {highlightContrast:F2}:1.");
+    Ensure(shadowContrast > 1.7, $"Face-to-outer-shadow contrast was only {shadowContrast:F2}:1.");
+    Console.WriteLine($"bevel-contrast-{(dark ? "dark" : "light")}=highlight:{highlightContrast:F2} shadow:{shadowContrast:F2}");
+}
+
+static void ValidatePressedBevel(string css)
+{
+    var raised = Regex.Match(css, @"\.menu-button\s*\{(?<declarations>[^}]*)\}",
+        RegexOptions.CultureInvariant).Groups["declarations"].Value;
+    Ensure(raised.Contains("var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer)",
+        StringComparison.Ordinal) && raised.Contains("inset 1px 1px 0 var(--bevel-hi-inner)", StringComparison.Ordinal) &&
+        raised.Contains("inset -1px -1px 0 var(--bevel-lo-inner)", StringComparison.Ordinal),
+        "Resting button did not use the raised double bevel.");
+
+    var pressedRules = Regex.Matches(css, @"\.menu\.is-open\s*>\s*\.menu-button\s*\{(?<declarations>[^}]*)\}",
+        RegexOptions.CultureInvariant).Cast<Match>().Select(match => match.Groups["declarations"].Value).ToArray();
+    var pressed = pressedRules.FirstOrDefault() ?? string.Empty;
+    Ensure(pressed.Contains("var(--bevel-lo-outer) var(--bevel-hi-outer) var(--bevel-hi-outer) var(--bevel-lo-outer)",
+        StringComparison.Ordinal), "Pressed state did not invert the outer bevel.");
+    Ensure(pressed.Contains("inset 1px 1px 0 var(--bevel-lo-inner)", StringComparison.Ordinal) &&
+        pressed.Contains("inset -1px -1px 0 var(--bevel-hi-inner)", StringComparison.Ordinal),
+        "Pressed state did not invert the inner bevel.");
+    Ensure(pressedRules.Any(rule => rule.Contains("padding-top: calc(0.22rem + 2px)", StringComparison.Ordinal) &&
+        rule.Contains("padding-left: calc(0.7rem + 2px)", StringComparison.Ordinal)),
+        "Pressed state did not nudge its label down and right.");
+}
+
+static void ValidateHardInsetShadows(string value)
+{
+    foreach (var shadow in value.Split(','))
+    {
+        Ensure(Regex.IsMatch(shadow.Trim(), @"^inset\s+-?\d+(?:\.\d+)?px\s+-?\d+(?:\.\d+)?px\s+0(?:px)?\s+var\(--bevel-(?:hi|lo)-inner\)$",
+            RegexOptions.CultureInvariant), $"Menu shadow is not a zero-blur inset bevel: {shadow.Trim()}");
+    }
+}
+
+static string ReadHexToken(string block, string name)
+{
+    var match = Regex.Match(block, $@"{Regex.Escape(name)}\s*:\s*(?<color>#[0-9A-Fa-f]{{6}})\s*;",
+        RegexOptions.CultureInvariant);
+    Ensure(match.Success, $"Bevel token '{name}' was missing or was not a six-digit color.");
+    return match.Groups["color"].Value;
+}
+
+static double RelativeLuminance(string color)
+{
+    var channels = new[]
+    {
+        Convert.ToInt32(color[1..3], 16) / 255d,
+        Convert.ToInt32(color[3..5], 16) / 255d,
+        Convert.ToInt32(color[5..7], 16) / 255d
+    };
+    var linear = channels.Select(channel => channel <= 0.04045
+        ? channel / 12.92
+        : Math.Pow((channel + 0.055) / 1.055, 2.4)).ToArray();
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+
+static double ContrastRatio(double first, double second) =>
+    (Math.Max(first, second) + 0.05) / (Math.Min(first, second) + 0.05);
 
 static bool HasAttribute(string tag, string name, string? value = null) =>
     value is null ? GetAttribute(tag, name) is not null :

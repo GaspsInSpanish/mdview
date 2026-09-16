@@ -5,7 +5,12 @@
   --muted: #6E6E68;
   --border: #E3E1D9;
   --accent: #CC785C;
-  --menu-shadow: var(--border);
+  --bevel-face: #C9C5B9;
+  --bevel-face-hover: #D2CEC2;
+  --bevel-hi-outer: #FFFFFF;
+  --bevel-hi-inner: #E7E3D9;
+  --bevel-lo-inner: #A8A499;
+  --bevel-lo-outer: #88847A;
   color-scheme: light dark;
 }
 
@@ -17,7 +22,12 @@
     --muted: #A0A09B;
     --border: #3E3E3C;
     --accent: #D4A27F;
-    --menu-shadow: #1A1A19;
+    --bevel-face: #3A3A35;
+    --bevel-face-hover: #42423D;
+    --bevel-hi-outer: #66665F;
+    --bevel-hi-inner: #505049;
+    --bevel-lo-inner: #222220;
+    --bevel-lo-outer: #0C0C0B;
   }
 }
 
@@ -47,10 +57,11 @@ main {
   display: flex;
   align-items: stretch;
   min-height: 2rem;
-  padding: 1px 2px;
-  border: 2px solid;
-  border-color: var(--bg) var(--menu-shadow) var(--menu-shadow) var(--bg);
-  background: var(--surface);
+  padding: 2px 3px;
+  border: 1px solid;
+  border-color: var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer);
+  background: var(--bevel-face);
+  box-shadow: inset 1px 1px 0 var(--bevel-hi-inner), inset -1px -1px 0 var(--bevel-lo-inner);
   color: var(--text);
   font-size: 0.875rem;
   line-height: 1.25;
@@ -66,17 +77,28 @@ main {
 
 .menu-button {
   height: 100%;
-  padding: 0.22rem 0.7rem;
-  border: 2px solid transparent;
-  background: var(--surface);
+  padding: calc(0.22rem + 1px) calc(0.7rem + 1px);
+  border: 1px solid;
+  border-color: var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer);
+  background: var(--bevel-face);
+  box-shadow: inset 1px 1px 0 var(--bevel-hi-inner), inset -1px -1px 0 var(--bevel-lo-inner);
 }
 
 .menu-button:hover {
-  border-color: var(--bg) var(--menu-shadow) var(--menu-shadow) var(--bg);
+  background: var(--bevel-face-hover);
 }
 
 .menu.is-open > .menu-button {
-  border-color: var(--menu-shadow) var(--bg) var(--bg) var(--menu-shadow);
+  border-color: var(--bevel-lo-outer) var(--bevel-hi-outer) var(--bevel-hi-outer) var(--bevel-lo-outer);
+  background: var(--bevel-face);
+  box-shadow: inset 1px 1px 0 var(--bevel-lo-inner), inset -1px -1px 0 var(--bevel-hi-inner);
+}
+
+.menu.is-open > .menu-button {
+  padding-top: calc(0.22rem + 2px);
+  padding-right: 0.7rem;
+  padding-bottom: 0.22rem;
+  padding-left: calc(0.7rem + 2px);
 }
 
 .menu-button:focus-visible,
@@ -91,10 +113,11 @@ main {
   left: 0;
   width: 15rem;
   max-width: calc(100vw - 0.5rem);
-  padding: 3px;
-  border: 2px solid;
-  border-color: var(--bg) var(--menu-shadow) var(--menu-shadow) var(--bg);
-  background: var(--surface);
+  padding: 4px;
+  border: 1px solid;
+  border-color: var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer);
+  background: var(--bevel-face);
+  box-shadow: inset 1px 1px 0 var(--bevel-hi-inner), inset -1px -1px 0 var(--bevel-lo-inner);
 }
 
 .menu-theme .menu-panel {
@@ -112,7 +135,7 @@ main {
   width: 100%;
   padding: 0.32rem 0.65rem;
   border: 0;
-  background: var(--surface);
+  background: var(--bevel-face);
   text-align: left;
   white-space: nowrap;
 }
@@ -139,8 +162,8 @@ main {
 .menu-separator {
   height: 0;
   margin: 3px 2px;
-  border-top: 1px solid var(--menu-shadow);
-  border-bottom: 1px solid var(--bg);
+  border-top: 1px solid var(--bevel-lo-inner);
+  border-bottom: 1px solid var(--bevel-hi-inner);
 }
 
 h1, h2, h3, h4, h5, h6 {
