@@ -92,6 +92,20 @@ output. For anything genuinely Windows-only — Brave discovery, registry reads,
 association, the installer — state plainly in your report that it is **unverified,
 pending a Windows run**, and say exactly what the user should click to verify it.
 
+**Rendered geometry is testable here — use it.** `tools/GeometryProbe` drives the
+Windows Brave binary headlessly from WSL and asserts on real `getBoundingClientRect()`
+and `getComputedStyle()` values. Two visual defects shipped before it existed (flat
+bevels; a dropdown rendered at x=−70) and **neither was catchable by DOM or CSS-source
+assertions** — correct markup, correct colours, positioned off-screen passes all of
+them. Any change to menu, panel, or bevel presentation must keep this probe green.
+Two constraints, both measured, both non-obvious:
+- **Never pass `--user-data-dir`** — it hangs headless Brave indefinitely through WSL
+  interop, regardless of output mode or whether the path is native or UNC.
+- **Headless Chromium clamps to a 500px minimum viewport**, and `innerWidth` is the
+  requested size minus ~16px of scrollbar. Assert against *measured* `innerWidth`,
+  never the requested `--window-size`. The `@media (max-width: 400px)` branch is
+  unreachable here and needs CDP device-metrics emulation.
+
 Honest "unverified on Windows" is correct and expected here. A false "works" is the
 one unacceptable answer.
 

@@ -16,6 +16,14 @@
 
   const items = index => [...menus[index].querySelectorAll('.menu-item')];
 
+  function keepPanelInViewport(panel) {
+    panel.style.setProperty('--menu-panel-shift', '0px');
+    const rectangle = panel.getBoundingClientRect();
+    const maximumLeft = Math.max(0, innerWidth - rectangle.width);
+    const clampedLeft = Math.min(Math.max(0, rectangle.left), maximumLeft);
+    panel.style.setProperty('--menu-panel-shift', `${clampedLeft - rectangle.left}px`);
+  }
+
   function closeMenu(restoreDocument = false) {
     menus.forEach((menu, index) => {
       menu.classList.remove('is-open');
@@ -34,6 +42,7 @@
       buttons[menuIndex].setAttribute('aria-expanded', String(open));
     });
     openIndex = index;
+    keepPanelInViewport(menus[index].querySelector('.menu-panel'));
     if (itemIndex !== null) {
       const menuItems = items(index);
       menuItems[(itemIndex + menuItems.length) % menuItems.length].focus();
@@ -283,6 +292,9 @@
 
   document.addEventListener('click', () => closeMenu());
   document.addEventListener('selectionchange', updateCopyState);
+  window.addEventListener('resize', () => {
+    if (openIndex >= 0) keepPanelInViewport(menus[openIndex].querySelector('.menu-panel'));
+  });
   findQuery.addEventListener('input', scheduleSearch);
   findQuery.addEventListener('keydown', event => {
     if (event.key === 'Enter') {

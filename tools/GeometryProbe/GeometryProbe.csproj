@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NuGetAudit>false</NuGetAudit>
+    <RootNamespace>MdView</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../src/MdView/Rendering/**/*.cs" Link="Rendering/%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="../../src/MdView/Serving/DocumentKind.cs" Link="Serving/DocumentKind.cs" />
+    <Compile Include="../../src/MdView/Serving/ThemeConfigStore.cs" Link="Serving/ThemeConfigStore.cs" />
+    <EmbeddedResource Include="../../src/MdView/Assets/**/*" Link="Assets/%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../src/MdView/Rendering/Theme.css" Link="Rendering/Theme.css" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Markdig" Version="1.3.2" />
+  </ItemGroup>
+</Project>

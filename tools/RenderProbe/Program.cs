@@ -88,6 +88,14 @@ static void ValidateMenuShell(string html)
     Ensure(Regex.IsMatch(css, """@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root:not\(\[data-theme="light"\]\)""",
         RegexOptions.CultureInvariant), "OS-dark rules were not guarded against forced light.");
     Ensure(css.Contains(":root[data-theme=\"dark\"]", StringComparison.Ordinal), "Forced-dark selector was missing.");
+    Ensure(!Regex.IsMatch(css,
+        @"[^{}]*\.menu-panel\s*\{(?=[^}]*\bright\s*:)(?=[^}]*\bleft\s*:\s*auto\s*;)[^}]*\}",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline),
+        "A menu panel uses right alignment with left:auto and can render off-screen.");
+    Ensure(menuScript.Contains("keepPanelInViewport", StringComparison.Ordinal) &&
+        menuScript.Contains("Math.min(Math.max(0, rectangle.left), maximumLeft)", StringComparison.Ordinal) &&
+        menuScript.Contains("window.addEventListener('resize'", StringComparison.Ordinal),
+        "Menu panels do not have a general viewport-clamping guard.");
     foreach (Match rule in Regex.Matches(css, @"(?<selectors>[^{}]+)\{(?<declarations>[^{}]*)\}", RegexOptions.CultureInvariant))
     {
         if (!rule.Groups["selectors"].Value.Contains(".menu", StringComparison.Ordinal)) continue;

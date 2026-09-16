@@ -149,11 +149,7 @@ main {
   border-color: var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer);
   background: var(--bevel-face);
   box-shadow: inset 1px 1px 0 var(--bevel-hi-inner), inset -1px -1px 0 var(--bevel-lo-inner);
-}
-
-.menu-theme .menu-panel {
-  right: 0;
-  left: auto;
+  transform: translateX(var(--menu-panel-shift, 0px));
 }
 
 .menu-panel[hidden] { display: none; }
