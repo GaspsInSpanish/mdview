@@ -3,6 +3,26 @@
 mdview is a small Windows reading utility: double-click a Markdown file and it opens in a focused, Claude-artifact-style Brave window that reloads when the file changes.
 
 
+
+## Menu bar
+
+A Windows 98-style menu bar sits at the top of the window. Brave `--app` windows have
+no native chrome, so the bar is drawn in the page — which is why the retro bevels are
+a free styling choice rather than a fight with the OS.
+
+- **File** — New, Open…, Save As…, Exit. Open and Save As use real Windows file
+  dialogs. The page never supplies a path: it sends a command, the app opens the
+  dialog, you pick the file. Save As copies the current document byte-for-byte
+  (line endings, BOM and all) and switches the window to the copy, like Notepad.
+- **Edit** — Copy, Select All, Find. Find highlights every match with a counter and
+  wrap-around, and is drawn without touching the document structure.
+- **Theme** — System, Light or Dark. Your choice is saved to
+  `%APPDATA%\mdview\config.json` and survives restarts. Other open windows follow
+  along immediately.
+
+The bar follows the theme rather than being period-accurate grey, so it doesn't glare
+at night.
+
 ## Clickable checkboxes
 
 GFM task lists are interactive. Clicking a checkbox toggles `[ ]` / `[x]` **in the

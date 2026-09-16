@@ -64,6 +64,7 @@ public static class Renderer
         html.AppendLine("</head>");
         html.AppendLine("<body tabindex=\"-1\">");
         AppendMenuBar(html, theme);
+        AppendFindBar(html);
         html.AppendLine("<main id=\"reader-content\" tabindex=\"-1\">");
         html.Append(body);
         html.AppendLine("</main>");
@@ -108,10 +109,24 @@ public static class Renderer
             if (index == separatorBefore) html.AppendLine("<div class=\"menu-separator\" role=\"separator\"></div>");
             var item = items[index];
             html.Append("<button class=\"menu-item\" type=\"button\" role=\"menuitem\" tabindex=\"-1\" data-command=\"")
-                .Append(item.Command).Append("\"><span>").Append(item.Label).Append("</span><span class=\"menu-accelerator\">")
+                .Append(item.Command).Append('"');
+            if (item.Command == "edit.copy") html.Append(" aria-disabled=\"true\"");
+            html.Append("><span>").Append(item.Label).Append("</span><span class=\"menu-accelerator\">")
                 .Append(item.Accelerator).AppendLine("</span></button>");
         }
         html.AppendLine("</div></div>");
+    }
+
+    private static void AppendFindBar(StringBuilder html)
+    {
+        html.AppendLine("<section class=\"find-bar\" role=\"search\" aria-label=\"Find in document\" hidden>");
+        html.AppendLine("<label class=\"find-label\" for=\"find-query\">Find:</label>");
+        html.AppendLine("<input id=\"find-query\" class=\"find-query\" type=\"search\" autocomplete=\"off\" spellcheck=\"false\" aria-describedby=\"find-status\">");
+        html.AppendLine("<span id=\"find-status\" class=\"find-status\" role=\"status\" aria-live=\"polite\">0 / 0</span>");
+        html.AppendLine("<button class=\"find-button\" type=\"button\" data-find-action=\"previous\" aria-label=\"Previous match\">Previous</button>");
+        html.AppendLine("<button class=\"find-button\" type=\"button\" data-find-action=\"next\" aria-label=\"Next match\">Next</button>");
+        html.AppendLine("<button class=\"find-button find-close\" type=\"button\" data-find-action=\"close\" aria-label=\"Close find\">×</button>");
+        html.AppendLine("</section>");
     }
 
     private static void AppendThemeMenu(StringBuilder html, ThemePreference theme)

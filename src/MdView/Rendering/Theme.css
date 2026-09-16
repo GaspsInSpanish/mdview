@@ -177,6 +177,13 @@ main {
   color: var(--bg);
 }
 
+.menu-item[aria-disabled="true"],
+.menu-item[aria-disabled="true"]:hover,
+.menu-item[aria-disabled="true"]:focus {
+  background: var(--bevel-face);
+  color: var(--muted);
+}
+
 .menu-accelerator {
   justify-self: end;
   color: inherit;
@@ -195,6 +202,101 @@ main {
   margin: 3px 2px;
   border-top: 1px solid var(--bevel-lo-inner);
   border-bottom: 1px solid var(--bevel-hi-inner);
+}
+
+.find-bar {
+  position: fixed;
+  z-index: 999;
+  top: 2.5rem;
+  right: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  max-width: calc(100vw - 1rem);
+  padding: 5px;
+  border: 1px solid;
+  border-color: var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer);
+  background: var(--bevel-face);
+  box-shadow: inset 1px 1px 0 var(--bevel-hi-inner), inset -1px -1px 0 var(--bevel-lo-inner);
+  color: var(--text);
+  font-size: 0.875rem;
+  line-height: 1.25;
+}
+
+.find-bar[hidden] { display: none; }
+
+.find-query {
+  appearance: none;
+  min-width: 6rem;
+  width: 15rem;
+  max-width: 40vw;
+  padding: 0.25rem 0.35rem;
+  border: 1px solid;
+  border-color: var(--bevel-lo-outer) var(--bevel-hi-outer) var(--bevel-hi-outer) var(--bevel-lo-outer);
+  background: var(--bg);
+  box-shadow: inset 1px 1px 0 var(--bevel-lo-inner), inset -1px -1px 0 var(--bevel-hi-inner);
+  color: var(--text);
+  font: inherit;
+}
+
+.find-button {
+  appearance: none;
+  padding: calc(0.25rem + 1px) calc(0.55rem + 1px);
+  border: 1px solid;
+  border-color: var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer);
+  background: var(--bevel-face);
+  box-shadow: inset 1px 1px 0 var(--bevel-hi-inner), inset -1px -1px 0 var(--bevel-lo-inner);
+  color: var(--text);
+  font: inherit;
+}
+
+.find-button:active {
+  padding-top: calc(0.25rem + 2px);
+  padding-right: 0.55rem;
+  padding-bottom: 0.25rem;
+  padding-left: calc(0.55rem + 2px);
+  border-color: var(--bevel-lo-outer) var(--bevel-hi-outer) var(--bevel-hi-outer) var(--bevel-lo-outer);
+  box-shadow: inset 1px 1px 0 var(--bevel-lo-inner), inset -1px -1px 0 var(--bevel-hi-inner);
+}
+
+.find-query:focus-visible,
+.find-button:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.find-status {
+  min-width: 3.75rem;
+  color: var(--muted);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.find-bar.is-no-matches .find-status {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+::highlight(mdview-find-results) {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text);
+}
+
+::highlight(mdview-find-current) {
+  background: var(--accent);
+  color: var(--bg);
+  text-decoration: underline;
+}
+
+@media (max-width: 36rem) {
+  .find-bar {
+    right: 0.25rem;
+    left: 0.25rem;
+    flex-wrap: wrap;
+  }
+
+  .find-label { display: none; }
+  .find-query { flex: 1 1 10rem; max-width: none; }
 }
 
 h1, h2, h3, h4, h5, h6 {

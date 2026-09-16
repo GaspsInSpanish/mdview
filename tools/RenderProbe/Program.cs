@@ -12,11 +12,13 @@ var markdown = await File.ReadAllTextAsync(args[0]);
 var title = Path.GetFileNameWithoutExtension(args[0]);
 var document = Renderer.RenderDocument(markdown, title);
 ValidateMenuShell(document);
+ValidateEditFeatures(document);
 ValidateThemeRendering(markdown, title);
 await File.WriteAllTextAsync(args[1], document);
 Console.WriteLine("render-menu=passed");
 Console.WriteLine("render-csp-nonces=passed");
 Console.WriteLine("render-menu-css=passed");
+Console.WriteLine("render-edit=passed");
 return 0;
 
 static void ValidateMenuShell(string html)
@@ -62,7 +64,7 @@ static void ValidateMenuShell(string html)
     Ensure(!menuScript.Contains("localStorage", StringComparison.Ordinal) &&
         menuScript.Contains("fetch('/theme'", StringComparison.Ordinal) &&
         menuScript.Contains("fetch(`/command/", StringComparison.Ordinal) &&
-        !menuScript.Contains("command.startsWith('edit.')", StringComparison.Ordinal),
+        !menuScript.Contains("fetch('/edit", StringComparison.Ordinal),
         "Menu commands were not limited to the assigned Theme and File endpoints.");
 
     var meta = tags.Single(tag => HasAttribute(tag, "http-equiv", "Content-Security-Policy"));
@@ -98,6 +100,70 @@ static void ValidateMenuShell(string html)
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
             ValidateHardInsetShadows(shadow.Groups["value"].Value);
     }
+}
+
+static void ValidateEditFeatures(string html)
+{
+    var tags = GetOpeningTags(html);
+    var findBar = tags.SingleOrDefault(tag => tag.StartsWith("<section", StringComparison.OrdinalIgnoreCase) &&
+        tag.Contains("class=\"find-bar\"", StringComparison.Ordinal))
+        ?? throw new InvalidOperationException("Find bar markup was missing.");
+    Ensure(findBar.Contains(" hidden", StringComparison.Ordinal) && HasAttribute(findBar, "role", "search") &&
+        HasAttribute(findBar, "aria-label", "Find in document"),
+        "Find bar was not hidden by default or lacked search semantics.");
+    Ensure(tags.Count(tag => HasAttribute(tag, "data-find-action")) == 3,
+        "Find bar did not contain Previous, Next, and Close controls.");
+    Ensure(tags.Any(tag => HasAttribute(tag, "id", "find-query") && HasAttribute(tag, "aria-describedby", "find-status")),
+        "Find input accessibility wiring was missing.");
+    Ensure(tags.Any(tag => HasAttribute(tag, "id", "find-status") && HasAttribute(tag, "role", "status") &&
+        HasAttribute(tag, "aria-live", "polite")), "Find status was not an accessible live region.");
+    Ensure(tags.Single(tag => HasAttribute(tag, "data-command", "edit.copy"))
+        .Contains("aria-disabled=\"true\"", StringComparison.Ordinal), "Copy was not initially disabled.");
+
+    var script = Assets.LoadScript("menu.js");
+    Ensure(script.Contains("CSS.highlights", StringComparison.Ordinal) &&
+        script.Contains("new Highlight", StringComparison.Ordinal) &&
+        script.Contains("document.createRange()", StringComparison.Ordinal),
+        "Find does not use the CSS Custom Highlight API with Range objects.");
+    foreach (var forbidden in new[] { "<mark", "insertNode", "surroundContents" })
+        Ensure(!script.Contains(forbidden, StringComparison.OrdinalIgnoreCase),
+            $"Find uses forbidden DOM mutation '{forbidden}'.");
+    Ensure(script.Contains("document.createTreeWalker(reader", StringComparison.Ordinal) &&
+        script.Contains("range.selectNodeContents(reader)", StringComparison.Ordinal),
+        "Search or Select All was not scoped to the reader <main>.");
+    Ensure(script.Contains("if (!text) return false", StringComparison.Ordinal) &&
+        script.Contains("aria-disabled", StringComparison.Ordinal) &&
+        script.Contains("navigator.clipboard.writeText", StringComparison.Ordinal) &&
+        script.Contains("document.execCommand('copy')", StringComparison.Ordinal),
+        "Copy did not enforce selection-only behavior with the required fallback.");
+    Ensure(script.Contains("setTimeout(runSearch, 150)", StringComparison.Ordinal),
+        "Incremental search was not debounced.");
+    Ensure(script.Contains("event.shiftKey ? -1 : 1", StringComparison.Ordinal) &&
+        script.Contains("% findRanges.length", StringComparison.Ordinal),
+        "Find navigation did not implement Shift+Enter and wrap-around.");
+    foreach (var shortcut in new[] { "=== 'f'", "=== 'a'", "=== 'c'" })
+        Ensure(script.Contains(shortcut, StringComparison.Ordinal), $"Edit shortcut {shortcut} was missing.");
+
+    var css = Assets.LoadTheme();
+    Ensure(css.Contains("::highlight(mdview-find-results)", StringComparison.Ordinal) &&
+        css.Contains("::highlight(mdview-find-current)", StringComparison.Ordinal),
+        "Find result/current highlight styles were missing.");
+    foreach (Match rule in Regex.Matches(css, @"(?<selectors>[^{}]+)\{(?<declarations>[^{}]*)\}", RegexOptions.CultureInvariant))
+    {
+        if (!rule.Groups["selectors"].Value.Contains(".find-", StringComparison.Ordinal)) continue;
+        var declarations = rule.Groups["declarations"].Value;
+        Ensure(!declarations.Contains("border-radius", StringComparison.OrdinalIgnoreCase),
+            "A find-bar rule uses border-radius.");
+        Ensure(!declarations.Contains("transition", StringComparison.OrdinalIgnoreCase),
+            "A find-bar rule uses a transition.");
+        foreach (Match shadow in Regex.Matches(declarations, @"box-shadow\s*:\s*(?<value>[^;]+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            ValidateHardInsetShadows(shadow.Groups["value"].Value);
+    }
+    var findRules = string.Join('\n', Regex.Matches(css, @"(?<selectors>[^{}]*\.find-[^{}]*)\{(?<declarations>[^{}]*)\}",
+        RegexOptions.CultureInvariant).Cast<Match>().Select(match => match.Value));
+    foreach (var token in new[] { "--bevel-face", "--bevel-hi-outer", "--bevel-hi-inner", "--bevel-lo-inner", "--bevel-lo-outer" })
+        Ensure(findRules.Contains($"var({token})", StringComparison.Ordinal), $"Find bar does not reuse {token}.");
 }
 
 static void ValidateThemeRendering(string markdown, string title)
