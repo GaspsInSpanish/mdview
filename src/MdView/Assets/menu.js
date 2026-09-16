@@ -51,7 +51,27 @@
   menus.forEach((menu, menuIndex) => {
     menu.querySelector('.menu-panel').addEventListener('click', event => event.stopPropagation());
     items(menuIndex).forEach(item => {
-      item.addEventListener('click', () => closeMenu(true));
+      item.addEventListener('click', async () => {
+        const command = item.dataset.command;
+        if (command.startsWith('theme.')) {
+          const theme = command.slice('theme.'.length);
+          item.disabled = true;
+          try {
+            const response = await fetch('/theme', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ theme, token: window.mdviewToggle.token })
+            });
+            if (!response.ok) throw new Error('Theme change failed.');
+            window.mdviewApplyTheme(theme);
+          } catch {
+            alert('Theme change was not saved.');
+          } finally {
+            item.disabled = false;
+          }
+        }
+        closeMenu(true);
+      });
       item.addEventListener('keydown', event => {
         const menuItems = items(menuIndex);
         const index = menuItems.indexOf(event.currentTarget);

@@ -1,4 +1,18 @@
 (() => {
+  window.mdviewApplyTheme = theme => {
+    if (theme === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', theme);
+    document.querySelectorAll('[data-command^="theme."]').forEach(item => {
+      item.setAttribute('aria-checked', String(item.dataset.command === `theme.${theme}`));
+    });
+  };
+
+  if (window.mdviewToggle.id) {
+    const events = new EventSource(`/events/${encodeURIComponent(window.mdviewToggle.id)}`);
+    events.addEventListener('reload', () => location.reload());
+    events.addEventListener('theme', event => window.mdviewApplyTheme(event.data));
+  }
+
   document.addEventListener('change', async event => {
     const checkbox = event.target;
     if (!checkbox.matches('input[data-line]')) return;

@@ -64,9 +64,9 @@ public sealed class BraveLauncher : IBrowserLauncher
                     return new(configuredPath, null);
                 }
             }
-            catch (JsonException exception)
+            catch (JsonException)
             {
-                return new(null, $"The Brave configuration is invalid: {exception.Message}");
+                // A malformed optional config must not prevent a document from opening.
             }
             catch (IOException exception)
             {

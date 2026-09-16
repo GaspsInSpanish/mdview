@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Include="../../src/MdView/Rendering/**/*.cs" Link="Rendering/%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="../../src/MdView/Serving/DocumentKind.cs" Link="Serving/DocumentKind.cs" />
+    <Compile Include="../../src/MdView/Serving/ThemeConfigStore.cs" Link="Serving/ThemeConfigStore.cs" />
     <EmbeddedResource Include="../../src/MdView/Assets/**/*" Link="Assets/%(RecursiveDir)%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../src/MdView/Rendering/Theme.css" Link="Rendering/Theme.css" />
   </ItemGroup>

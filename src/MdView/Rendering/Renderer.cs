@@ -34,7 +34,8 @@ public static class Renderer
         => RenderDocument(DocumentKind.Markdown, markdown, title);
 
     /// <summary>Renders a supported document format as a complete, self-contained HTML5 document.</summary>
-    public static string RenderDocument(DocumentKind kind, string document, string title, string documentId = "", string writeToken = "", string? cspNonce = null)
+    public static string RenderDocument(DocumentKind kind, string document, string title, string documentId = "", string writeToken = "",
+        string? cspNonce = null, ThemePreference theme = ThemePreference.System)
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(title);
@@ -48,7 +49,10 @@ public static class Renderer
         };
         var html = new StringBuilder();
         html.AppendLine("<!doctype html>");
-        html.AppendLine("<html lang=\"en\">");
+        html.Append("<html lang=\"en\"");
+        if (theme is not ThemePreference.System)
+            html.Append(" data-theme=\"").Append(ThemeConfigStore.ToWireValue(theme)).Append('"');
+        html.AppendLine(">");
         html.AppendLine("<head>");
         html.AppendLine("<meta charset=\"utf-8\">");
         html.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
@@ -59,7 +63,7 @@ public static class Renderer
         html.AppendLine("</style>");
         html.AppendLine("</head>");
         html.AppendLine("<body tabindex=\"-1\">");
-        AppendMenuBar(html);
+        AppendMenuBar(html, theme);
         html.AppendLine("<main id=\"reader-content\" tabindex=\"-1\">");
         html.Append(body);
         html.AppendLine("</main>");
@@ -79,7 +83,7 @@ public static class Renderer
         return html.ToString();
     }
 
-    private static void AppendMenuBar(StringBuilder html)
+    private static void AppendMenuBar(StringBuilder html, ThemePreference theme)
     {
         html.AppendLine("<nav class=\"menu-bar\" role=\"menubar\" aria-label=\"Application menu\">");
         AppendMenu(html, "file", "File",
@@ -88,7 +92,7 @@ public static class Renderer
         AppendMenu(html, "edit", "Edit",
             [("Copy", "Ctrl+C", "edit.copy"), ("Select All", "Ctrl+A", "edit.select-all"),
              ("Find…", "Ctrl+F", "edit.find")]);
-        AppendThemeMenu(html);
+        AppendThemeMenu(html, theme);
         html.AppendLine("</nav>");
     }
 
@@ -110,15 +114,23 @@ public static class Renderer
         html.AppendLine("</div></div>");
     }
 
-    private static void AppendThemeMenu(StringBuilder html)
+    private static void AppendThemeMenu(StringBuilder html, ThemePreference theme)
     {
         html.AppendLine("<div class=\"menu menu-theme\" data-menu=\"theme\">");
         html.AppendLine("<button class=\"menu-button\" type=\"button\" role=\"menuitem\" aria-haspopup=\"true\" aria-expanded=\"false\" aria-controls=\"menu-theme\">Theme</button>");
         html.AppendLine("<div class=\"menu-panel\" id=\"menu-theme\" role=\"menu\" hidden>");
-        html.AppendLine("<button class=\"menu-item menu-radio\" type=\"button\" role=\"menuitemradio\" aria-checked=\"true\" tabindex=\"-1\" data-command=\"theme.system\"><span>System</span><span class=\"menu-accelerator\"></span></button>");
-        html.AppendLine("<button class=\"menu-item menu-radio\" type=\"button\" role=\"menuitemradio\" aria-checked=\"false\" tabindex=\"-1\" data-command=\"theme.light\"><span>Light</span><span class=\"menu-accelerator\"></span></button>");
-        html.AppendLine("<button class=\"menu-item menu-radio\" type=\"button\" role=\"menuitemradio\" aria-checked=\"false\" tabindex=\"-1\" data-command=\"theme.dark\"><span>Dark</span><span class=\"menu-accelerator\"></span></button>");
+        AppendThemeItem(html, "System", "system", theme is ThemePreference.System);
+        AppendThemeItem(html, "Light", "light", theme is ThemePreference.Light);
+        AppendThemeItem(html, "Dark", "dark", theme is ThemePreference.Dark);
         html.AppendLine("</div></div>");
+    }
+
+    private static void AppendThemeItem(StringBuilder html, string label, string value, bool isCurrent)
+    {
+        html.Append("<button class=\"menu-item menu-radio\" type=\"button\" role=\"menuitemradio\" aria-checked=\"")
+            .Append(isCurrent ? "true" : "false").Append("\" tabindex=\"-1\" data-command=\"theme.")
+            .Append(value).Append("\"><span>").Append(label)
+            .AppendLine("</span><span class=\"menu-accelerator\"></span></button>");
     }
 
     private static void AppendScript(StringBuilder html, string nonce, string script)

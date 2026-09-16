@@ -1,4 +1,5 @@
 using MdView.Rendering;
+using MdView.Serving;
 using System.Text.RegularExpressions;
 
 if (args.Length != 2)
@@ -11,6 +12,7 @@ var markdown = await File.ReadAllTextAsync(args[0]);
 var title = Path.GetFileNameWithoutExtension(args[0]);
 var document = Renderer.RenderDocument(markdown, title);
 ValidateMenuShell(document);
+ValidateThemeRendering(markdown, title);
 await File.WriteAllTextAsync(args[1], document);
 Console.WriteLine("render-menu=passed");
 Console.WriteLine("render-csp-nonces=passed");
@@ -58,7 +60,10 @@ static void ValidateMenuShell(string html)
     foreach (var behavior in new[] { "event.key === 'Alt'", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "event.key === 'Enter'", "event.key === 'Escape'", "aria-expanded" })
         Ensure(menuScript.Contains(behavior, StringComparison.Ordinal), $"Menu behavior '{behavior}' was missing.");
     Ensure(!menuScript.Contains("localStorage", StringComparison.Ordinal) &&
-        !menuScript.Contains("fetch(", StringComparison.Ordinal), "Menu shell must not persist state or call an endpoint.");
+        menuScript.Contains("fetch('/theme'", StringComparison.Ordinal) &&
+        !menuScript.Contains("fetch('/open'", StringComparison.Ordinal) &&
+        !menuScript.Contains("fetch('/toggle'", StringComparison.Ordinal),
+        "Menu shell must persist only theme through its assigned endpoint.");
 
     var meta = tags.Single(tag => HasAttribute(tag, "http-equiv", "Content-Security-Policy"));
     var policy = GetAttribute(meta, "content") ?? throw new InvalidOperationException("CSP meta had no content.");
@@ -78,6 +83,9 @@ static void ValidateMenuShell(string html)
     ValidateBevelTheme(css, dark: false);
     ValidateBevelTheme(css, dark: true);
     ValidatePressedBevel(css);
+    Ensure(Regex.IsMatch(css, """@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root:not\(\[data-theme="light"\]\)""",
+        RegexOptions.CultureInvariant), "OS-dark rules were not guarded against forced light.");
+    Ensure(css.Contains(":root[data-theme=\"dark\"]", StringComparison.Ordinal), "Forced-dark selector was missing.");
     foreach (Match rule in Regex.Matches(css, @"(?<selectors>[^{}]+)\{(?<declarations>[^{}]*)\}", RegexOptions.CultureInvariant))
     {
         if (!rule.Groups["selectors"].Value.Contains(".menu", StringComparison.Ordinal)) continue;
@@ -92,14 +100,37 @@ static void ValidateMenuShell(string html)
     }
 }
 
+static void ValidateThemeRendering(string markdown, string title)
+{
+    var systemHtml = Renderer.RenderDocument(DocumentKind.Markdown, markdown, title, theme: ThemePreference.System);
+    var lightHtml = Renderer.RenderDocument(DocumentKind.Markdown, markdown, title, theme: ThemePreference.Light);
+    var darkHtml = Renderer.RenderDocument(DocumentKind.Markdown, markdown, title, theme: ThemePreference.Dark);
+    var systemRoot = GetOpeningTags(systemHtml).Single(tag => tag.StartsWith("<html", StringComparison.OrdinalIgnoreCase));
+    var lightRoot = GetOpeningTags(lightHtml).Single(tag => tag.StartsWith("<html", StringComparison.OrdinalIgnoreCase));
+    var darkRoot = GetOpeningTags(darkHtml).Single(tag => tag.StartsWith("<html", StringComparison.OrdinalIgnoreCase));
+    Ensure(!HasAttribute(systemRoot, "data-theme"), "System rendering must omit data-theme.");
+    Ensure(HasAttribute(lightRoot, "data-theme", "light"), "Light rendering did not force light.");
+    Ensure(HasAttribute(darkRoot, "data-theme", "dark"), "Dark rendering did not force dark.");
+    EnsureCheckedTheme(systemHtml, "system");
+    EnsureCheckedTheme(lightHtml, "light");
+    EnsureCheckedTheme(darkHtml, "dark");
+}
+
+static void EnsureCheckedTheme(string html, string theme)
+{
+    var checkedItems = GetOpeningTags(html).Where(tag => HasAttribute(tag, "aria-checked", "true") &&
+        GetAttribute(tag, "data-command")?.StartsWith("theme.", StringComparison.Ordinal) == true).ToArray();
+    Ensure(checkedItems.Length == 1 && HasAttribute(checkedItems[0], "data-command", $"theme.{theme}"),
+        $"Theme menu did not mark only {theme} as current.");
+}
+
 static void ValidateBevelTheme(string css, bool dark)
 {
-    var blockPattern = dark
-        ? @"@media\s*\(prefers-color-scheme:\s*dark\)\s*\{\s*:root\s*\{(?<tokens>[^}]*)\}"
-        : @"^\s*:root\s*\{(?<tokens>[^}]*)\}";
-    var block = Regex.Match(css, blockPattern, RegexOptions.CultureInvariant).Groups["tokens"].Value;
+    var block = Regex.Match(css, @"^\s*:root\s*\{(?<tokens>[^}]*)\}",
+        RegexOptions.CultureInvariant).Groups["tokens"].Value;
     Ensure(block.Length > 0, $"{(dark ? "Dark" : "Light")} theme token block was missing.");
-    var names = new[] { "--bevel-hi-outer", "--bevel-hi-inner", "--bevel-face", "--bevel-lo-inner", "--bevel-lo-outer" };
+    var prefix = dark ? "--dark-bevel-" : "--bevel-";
+    var names = new[] { $"{prefix}hi-outer", $"{prefix}hi-inner", $"{prefix}face", $"{prefix}lo-inner", $"{prefix}lo-outer" };
     var colors = names.Select(name => ReadHexToken(block, name)).ToArray();
     var luminances = colors.Select(RelativeLuminance).ToArray();
     for (var index = 1; index < luminances.Length; index++)

@@ -23,9 +23,14 @@ if (args.Length == 1 && args[0] == "--security")
     return await RunSecurityChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--theme")
+{
+    return await RunThemeChecksAsync();
+}
+
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme");
     return 1;
 }
 
@@ -72,6 +77,173 @@ static async Task<int> RunSecurityChecksAsync()
     failed |= !await RunCheckAsync("security-uri-regression", CheckSecurityUrisAsync);
     failed |= !await RunCheckAsync("security-csp-and-functionality", CheckCspAndFunctionalityAsync);
     return failed ? 1 : 0;
+}
+
+static async Task<int> RunThemeChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("theme-config-store", CheckThemeConfigStoreAsync);
+    failed |= !await RunCheckAsync("theme-valid-values-and-preservation", CheckThemeValuesAsync);
+    failed |= !await RunCheckAsync("theme-invalid-values", CheckInvalidThemesAsync);
+    failed |= !await RunCheckAsync("theme-token-enforcement", CheckThemeTokensAsync);
+    failed |= !await RunCheckAsync("theme-corrupt-config", CheckCorruptThemeConfigAsync);
+    failed |= !await RunCheckAsync("theme-cross-window-sse", CheckThemeBroadcastAsync);
+    return failed ? 1 : 0;
+}
+
+static async Task CheckThemeConfigStoreAsync()
+{
+    var stateDirectory = CreateProbeDirectory("theme-store");
+    try
+    {
+        var store = new ThemeConfigStore(stateDirectory);
+        const string bravePath = @"C:\Tools\Brave\brave.exe";
+        await File.WriteAllTextAsync(store.ConfigPath,
+            JsonSerializer.Serialize(new { bravePath, unknown = "keep", theme = "light" }));
+        Ensure(store.ReadTheme() == ThemePreference.Light, "Config store did not read light.");
+        store.WriteTheme(ThemePreference.Dark);
+        using (var config = JsonDocument.Parse(await File.ReadAllTextAsync(store.ConfigPath)))
+        {
+            Ensure(config.RootElement.GetProperty("bravePath").GetString() == bravePath, "Config store changed bravePath.");
+            Ensure(config.RootElement.GetProperty("unknown").GetString() == "keep", "Config store removed an unknown key.");
+            Ensure(config.RootElement.GetProperty("theme").GetString() == "dark", "Config store did not write dark.");
+        }
+        await File.WriteAllTextAsync(store.ConfigPath, "{\"theme\":");
+        Ensure(store.ReadTheme() == ThemePreference.System, "Corrupt config did not fall back to system.");
+        foreach (var wrongType in new[] { "{\"theme\":42}", "{\"theme\":{}}", "[]" })
+        {
+            await File.WriteAllTextAsync(store.ConfigPath, wrongType);
+            Ensure(store.ReadTheme() == ThemePreference.System, "Wrong-typed config did not fall back to system.");
+        }
+    }
+    finally { TryDeleteDirectory(stateDirectory); }
+}
+
+static async Task CheckThemeValuesAsync()
+{
+    var stateDirectory = CreateProbeDirectory("theme-state");
+    try
+    {
+        var store = new ThemeConfigStore(stateDirectory);
+        const string bravePath = @"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe";
+        await File.WriteAllTextAsync(store.ConfigPath,
+            JsonSerializer.Serialize(new { bravePath, futureKey = new { retained = true }, theme = "system" }));
+        await using var fixture = await ToggleFixture.CreateAsync("# Theme\n", store);
+        foreach (var theme in new[] { "system", "light", "dark" })
+        {
+            EnsureStatus(await fixture.ThemeAsync(theme), HttpStatusCode.NoContent);
+            using var config = JsonDocument.Parse(await File.ReadAllTextAsync(store.ConfigPath));
+            Ensure(config.RootElement.GetProperty("theme").GetString() == theme, $"Config did not store {theme}.");
+            Ensure(config.RootElement.GetProperty("bravePath").GetString() == bravePath, "Theme write changed bravePath.");
+            Ensure(config.RootElement.GetProperty("futureKey").GetProperty("retained").GetBoolean(),
+                "Theme write removed an unknown config key.");
+            AssertRenderedTheme(await fixture.FetchHtmlAsync(), theme);
+        }
+    }
+    finally { TryDeleteDirectory(stateDirectory); }
+}
+
+static async Task CheckInvalidThemesAsync()
+{
+    var stateDirectory = CreateProbeDirectory("theme-invalid");
+    try
+    {
+        var store = new ThemeConfigStore(stateDirectory);
+        const string original = "{\"bravePath\":\"unchanged\",\"theme\":\"system\"}";
+        await File.WriteAllTextAsync(store.ConfigPath, original);
+        await using var fixture = await ToggleFixture.CreateAsync("# Invalid themes\n", store);
+        foreach (var invalid in new string?[] { "blue", "", null, new string('x', 10_000) })
+        {
+            EnsureStatus(await fixture.ThemeAsync(invalid), HttpStatusCode.BadRequest);
+            Ensure(await File.ReadAllTextAsync(store.ConfigPath) == original, "Invalid theme modified config.json.");
+        }
+        var objectValue = $"{{\"theme\":{{}},\"token\":{JsonSerializer.Serialize(fixture.Token)}}}";
+        EnsureStatus(await fixture.ThemeRawAsync(objectValue), HttpStatusCode.BadRequest);
+        Ensure(await File.ReadAllTextAsync(store.ConfigPath) == original, "Object theme modified config.json.");
+    }
+    finally { TryDeleteDirectory(stateDirectory); }
+}
+
+static async Task CheckThemeTokensAsync()
+{
+    var stateDirectory = CreateProbeDirectory("theme-token");
+    try
+    {
+        var store = new ThemeConfigStore(stateDirectory);
+        const string original = "{\"theme\":\"system\"}";
+        await File.WriteAllTextAsync(store.ConfigPath, original);
+        await using var fixture = await ToggleFixture.CreateAsync("# Tokens\n", store);
+        EnsureStatus(await fixture.ThemeAsync("dark", token: null), HttpStatusCode.Forbidden);
+        EnsureStatus(await fixture.ThemeAsync("dark", token: "wrong-token"), HttpStatusCode.Forbidden);
+        EnsureStatus(await fixture.ThemeAsync("dark", origin: null), HttpStatusCode.Forbidden);
+        EnsureStatus(await fixture.ThemeAsync("dark", origin: "http://127.0.0.1:1"), HttpStatusCode.Forbidden);
+        Ensure(await File.ReadAllTextAsync(store.ConfigPath) == original, "Rejected token modified config.json.");
+        EnsureStatus(await fixture.ThemeAsync("dark"), HttpStatusCode.NoContent);
+        Ensure(JsonDocument.Parse(await File.ReadAllTextAsync(store.ConfigPath)).RootElement
+            .GetProperty("theme").GetString() == "dark", "Valid token did not update theme.");
+    }
+    finally { TryDeleteDirectory(stateDirectory); }
+}
+
+static async Task CheckCorruptThemeConfigAsync()
+{
+    var stateDirectory = CreateProbeDirectory("theme-corrupt");
+    try
+    {
+        var store = new ThemeConfigStore(stateDirectory);
+        await File.WriteAllTextAsync(store.ConfigPath, "{");
+        await using var fixture = await ToggleFixture.CreateAsync("# Corrupt\n", store);
+        AssertRenderedTheme(fixture.Html, "system");
+        foreach (var corrupt in new[] { "{\"theme\":42}", "{\"theme\":{}}", "[]" })
+        {
+            await File.WriteAllTextAsync(store.ConfigPath, corrupt);
+            AssertRenderedTheme(await fixture.FetchHtmlAsync(), "system");
+        }
+    }
+    finally { TryDeleteDirectory(stateDirectory); }
+}
+
+static async Task CheckThemeBroadcastAsync()
+{
+    var stateDirectory = CreateProbeDirectory("theme-sse");
+    try
+    {
+        var store = new ThemeConfigStore(stateDirectory);
+        await using var fixture = await ToggleFixture.CreateAsync("# Windows\n", store);
+        await using var firstWindow = await fixture.ConnectEventsAsync();
+        await using var secondWindow = await fixture.ConnectEventsAsync();
+        EnsureStatus(await fixture.ThemeAsync("light"), HttpStatusCode.NoContent);
+        Ensure(await firstWindow.WaitForEventAsync("theme", TimeSpan.FromSeconds(5)) == "light",
+            "First window did not receive the theme event.");
+        Ensure(await secondWindow.WaitForEventAsync("theme", TimeSpan.FromSeconds(5)) == "light",
+            "Second window did not receive the theme event.");
+    }
+    finally { TryDeleteDirectory(stateDirectory); }
+}
+
+static void AssertRenderedTheme(string html, string theme)
+{
+    var root = GetOpeningTags(html).Single(tag => tag.StartsWith("<html", StringComparison.OrdinalIgnoreCase));
+    var hasTheme = Regex.Match(root, "\\sdata-theme=\\\"(?<theme>[^\\\"]+)\\\"", RegexOptions.CultureInvariant);
+    if (theme == "system") Ensure(!hasTheme.Success, "System theme rendered a data-theme attribute.");
+    else Ensure(hasTheme.Success && hasTheme.Groups["theme"].Value == theme, $"Rendered theme was not {theme}.");
+    var checkedCommands = GetOpeningTags(html)
+        .Where(tag => tag.Contains("data-command=\"theme.", StringComparison.Ordinal) &&
+            tag.Contains("aria-checked=\"true\"", StringComparison.Ordinal)).ToArray();
+    Ensure(checkedCommands.Length == 1 && checkedCommands[0].Contains($"data-command=\"theme.{theme}\"", StringComparison.Ordinal),
+        "Rendered theme menu did not have exactly one matching checked item.");
+}
+
+static string CreateProbeDirectory(string prefix)
+{
+    var path = Path.Combine(Path.GetTempPath(), $"mdview-{prefix}-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(path);
+    return path;
+}
+
+static void TryDeleteDirectory(string path)
+{
+    try { Directory.Delete(path, true); } catch (IOException) { }
 }
 
 static Task CheckEventHandlerVectorsAsync()
@@ -594,16 +766,16 @@ sealed class ToggleFixture : IAsyncDisposable
     internal string Html { get; }
     internal string? ContentSecurityPolicy { get; }
 
-    internal static Task<ToggleFixture> CreateAsync(string source) =>
-        CreateAsync(Encoding.UTF8.GetBytes(source));
+    internal static Task<ToggleFixture> CreateAsync(string source, ThemeConfigStore? themeConfig = null) =>
+        CreateAsync(Encoding.UTF8.GetBytes(source), themeConfig);
 
-    internal static async Task<ToggleFixture> CreateAsync(byte[] source)
+    internal static async Task<ToggleFixture> CreateAsync(byte[] source, ThemeConfigStore? themeConfig = null)
     {
         var directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"mdview-toggle-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
         var path = System.IO.Path.Combine(directory, "fixture.md");
         await File.WriteAllBytesAsync(path, source);
-        var server = new ReaderServer();
+        var server = new ReaderServer(themeConfig: themeConfig);
         try
         {
             server.Start();
@@ -637,6 +809,23 @@ sealed class ToggleFixture : IAsyncDisposable
         using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{server.Port}/toggle");
         request.Headers.Add("Origin", $"http://127.0.0.1:{server.Port}");
         request.Content = JsonContent.Create(new { id = Id, line, @checked = expectedChecked, token = effectiveToken });
+        using var response = await client.SendAsync(request);
+        return response.StatusCode;
+    }
+
+    internal Task<HttpStatusCode> ThemeAsync(string? theme, string? token = "__fixture_token__",
+        string? origin = "__fixture_origin__")
+    {
+        var effectiveToken = token == "__fixture_token__" ? Token : token;
+        return ThemeRawAsync(JsonSerializer.Serialize(new { theme, token = effectiveToken }), origin);
+    }
+
+    internal async Task<HttpStatusCode> ThemeRawAsync(string json, string? origin = "__fixture_origin__")
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{server.Port}/theme");
+        if (origin is not null)
+            request.Headers.Add("Origin", origin == "__fixture_origin__" ? $"http://127.0.0.1:{server.Port}" : origin);
+        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         using var response = await client.SendAsync(request);
         return response.StatusCode;
     }
@@ -676,6 +865,13 @@ sealed class ToggleFixture : IAsyncDisposable
         return response.Headers.TryGetValues("Content-Security-Policy", out var policies) ? policies.Single() : null;
     }
 
+    internal async Task<string> FetchHtmlAsync()
+    {
+        using var response = await client.GetAsync($"http://127.0.0.1:{server.Port}/d/{Id}");
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsStringAsync();
+    }
+
     public ValueTask DisposeAsync()
     {
         client.Dispose();
@@ -690,7 +886,7 @@ sealed class EventStream : IAsyncDisposable
     private readonly HttpClient client;
     private readonly HttpResponseMessage response;
     private readonly StreamReader reader;
-    private readonly Channel<bool> reloads = Channel.CreateUnbounded<bool>();
+    private readonly Channel<ProbeEvent> events = Channel.CreateUnbounded<ProbeEvent>();
     private readonly Task readPump;
     private volatile bool stopping;
 
@@ -702,19 +898,23 @@ sealed class EventStream : IAsyncDisposable
         readPump = ReadEventsAsync();
     }
 
-    internal async Task<bool> HasReloadAsync(TimeSpan timeout)
+    internal async Task<bool> HasReloadAsync(TimeSpan timeout) =>
+        await WaitForEventAsync("reload", timeout) is not null;
+
+    internal async Task<string?> WaitForEventAsync(string eventName, TimeSpan timeout)
     {
         using var cancellation = new CancellationTokenSource(timeout);
         try
         {
-            if (!await reloads.Reader.WaitToReadAsync(cancellation.Token))
-                throw new IOException("SSE stream ended before the assertion completed.");
-            return reloads.Reader.TryRead(out _);
+            while (await events.Reader.WaitToReadAsync(cancellation.Token))
+                while (events.Reader.TryRead(out var message))
+                    if (message.Name == eventName) return message.Data;
+            throw new IOException("SSE stream ended before the assertion completed.");
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
-            if (readPump.IsCompleted) await reloads.Reader.Completion;
-            return false;
+            if (readPump.IsCompleted) await events.Reader.Completion;
+            return null;
         }
     }
 
@@ -722,21 +922,30 @@ sealed class EventStream : IAsyncDisposable
     {
         try
         {
+            string? eventName = null;
+            string? data = null;
             while (true)
             {
                 var line = await reader.ReadLineAsync();
                 if (line is null)
                     throw new IOException("SSE stream closed unexpectedly.");
-                if (line == "event: reload") reloads.Writer.TryWrite(true);
+                if (line.StartsWith("event: ", StringComparison.Ordinal)) eventName = line[7..];
+                else if (line.StartsWith("data: ", StringComparison.Ordinal)) data = line[6..];
+                else if (line.Length == 0 && eventName is not null)
+                {
+                    events.Writer.TryWrite(new ProbeEvent(eventName, data ?? string.Empty));
+                    eventName = null;
+                    data = null;
+                }
             }
         }
         catch (Exception) when (stopping)
         {
-            reloads.Writer.TryComplete();
+            events.Writer.TryComplete();
         }
         catch (Exception exception)
         {
-            reloads.Writer.TryComplete(exception);
+            events.Writer.TryComplete(exception);
         }
     }
 
@@ -748,4 +957,6 @@ sealed class EventStream : IAsyncDisposable
         client.Dispose();
         await readPump.ConfigureAwait(false);
     }
+
+    private sealed record ProbeEvent(string Name, string Data);
 }

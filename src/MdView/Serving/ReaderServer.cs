@@ -16,6 +16,7 @@ public sealed class ReaderServer : IDisposable
     private const int LastPort = 7817;
 
     private readonly DocumentRegistry registry;
+    private readonly ThemeConfigStore themeConfig;
     private readonly ConcurrentDictionary<string, Lazy<DocumentWatcher>> watchers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<long, SseClient> clients = new();
     private readonly CancellationTokenSource shutdown = new();
@@ -27,9 +28,10 @@ public sealed class ReaderServer : IDisposable
     private readonly string writeToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(24)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     private readonly ConcurrentDictionary<string, byte[]> suppressedHashes = new(StringComparer.Ordinal);
 
-    public ReaderServer(DocumentRegistry? registry = null)
+    public ReaderServer(DocumentRegistry? registry = null, ThemeConfigStore? themeConfig = null)
     {
         this.registry = registry ?? new DocumentRegistry();
+        this.themeConfig = themeConfig ?? new ThemeConfigStore();
     }
 
     /// <summary>The loopback TCP port chosen when the listener starts.</summary>
@@ -147,6 +149,12 @@ public sealed class ReaderServer : IDisposable
                 return;
             }
 
+            if (context.Request.HttpMethod == "POST" && segments.Length == 1 && segments[0] == "theme")
+            {
+                await SetThemeAsync(context).ConfigureAwait(false);
+                return;
+            }
+
             await WriteNotFoundAsync(context.Response).ConfigureAwait(false);
             context.Response.Close();
         }
@@ -198,7 +206,8 @@ public sealed class ReaderServer : IDisposable
 
             var nonce = Renderer.CreateNonce();
             var contentSecurityPolicy = Renderer.CreateContentSecurityPolicy(nonce);
-            var html = Renderer.RenderDocument(document.Kind, source, document.Title, document.Id, writeToken, nonce);
+            var theme = themeConfig.ReadTheme();
+            var html = Renderer.RenderDocument(document.Kind, source, document.Title, document.Id, writeToken, nonce, theme);
             var bytes = Encoding.UTF8.GetBytes(html);
             context.Response.StatusCode = (int)HttpStatusCode.OK;
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -275,6 +284,41 @@ public sealed class ReaderServer : IDisposable
         finally { context.Response.Close(); }
     }
 
+    private async Task SetThemeAsync(HttpListenerContext context)
+    {
+        try
+        {
+            var origin = context.Request.Headers["Origin"];
+            if (!string.Equals(origin, $"http://127.0.0.1:{Port}", StringComparison.Ordinal))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.Forbidden, "Forbidden").ConfigureAwait(false);
+                return;
+            }
+
+            var request = await JsonSerializer.DeserializeAsync<ThemeRequest>(context.Request.InputStream).ConfigureAwait(false);
+            if (request is null || !CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(request.Token ?? string.Empty), Encoding.UTF8.GetBytes(writeToken)))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.Forbidden, "Forbidden").ConfigureAwait(false);
+                return;
+            }
+            if (!ThemeConfigStore.TryParse(request.Theme, out var theme))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+                return;
+            }
+
+            themeConfig.WriteTheme(theme);
+            BroadcastTheme(ThemeConfigStore.ToWireValue(theme));
+            context.Response.StatusCode = (int)HttpStatusCode.NoContent;
+        }
+        catch (JsonException)
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+        }
+        finally { context.Response.Close(); }
+    }
+
     private async Task ServeEventsAsync(HttpListenerContext context, RegisteredDocument document)
     {
         var client = new SseClient(Interlocked.Increment(ref nextClientId), document.Id, context.Response);
@@ -308,9 +352,9 @@ public sealed class ReaderServer : IDisposable
                     break;
                 }
 
-                while (client.Messages.Reader.TryRead(out _))
+                while (client.Messages.Reader.TryRead(out var message))
                 {
-                    await client.WriteAsync("event: reload\ndata: reload\n\n", shutdown.Token).ConfigureAwait(false);
+                    await client.WriteAsync($"event: {message.Event}\ndata: {message.Data}\n\n", shutdown.Token).ConfigureAwait(false);
                 }
             }
         }
@@ -379,11 +423,17 @@ public sealed class ReaderServer : IDisposable
         {
             if (client.DocumentId == documentId)
             {
-                client.Messages.Writer.TryWrite(documentId);
+                client.Messages.Writer.TryWrite(new SseMessage("reload", "reload"));
             }
         }
 
         return Task.CompletedTask;
+    }
+
+    private void BroadcastTheme(string theme)
+    {
+        foreach (var client in clients.Values)
+            client.Messages.Writer.TryWrite(new SseMessage("theme", theme));
     }
 
     private sealed record ToggleRequest(
@@ -391,6 +441,12 @@ public sealed class ReaderServer : IDisposable
         [property: JsonPropertyName("line")] int Line,
         [property: JsonPropertyName("checked")] bool Checked,
         [property: JsonPropertyName("token")] string? Token);
+
+    private sealed record ThemeRequest(
+        [property: JsonPropertyName("theme")] string? Theme,
+        [property: JsonPropertyName("token")] string? Token);
+
+    private sealed record SseMessage(string Event, string Data);
 
     private static async Task<string?> ReadDocumentAsync(string path)
     {
@@ -487,7 +543,7 @@ public sealed class ReaderServer : IDisposable
 
         internal long Id { get; } = id;
         internal string DocumentId { get; } = documentId;
-        internal Channel<string> Messages { get; } = Channel.CreateUnbounded<string>();
+        internal Channel<SseMessage> Messages { get; } = Channel.CreateUnbounded<SseMessage>();
 
         internal async Task WriteAsync(string message, CancellationToken cancellationToken)
         {

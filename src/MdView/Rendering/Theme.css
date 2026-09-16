@@ -11,24 +11,55 @@
   --bevel-hi-inner: #E7E3D9;
   --bevel-lo-inner: #A8A499;
   --bevel-lo-outer: #88847A;
+  --dark-bg: #262624;
+  --dark-surface: #30302E;
+  --dark-text: #E8E6E3;
+  --dark-muted: #A0A09B;
+  --dark-border: #3E3E3C;
+  --dark-accent: #D4A27F;
+  --dark-bevel-face: #3A3A35;
+  --dark-bevel-face-hover: #42423D;
+  --dark-bevel-hi-outer: #66665F;
+  --dark-bevel-hi-inner: #505049;
+  --dark-bevel-lo-inner: #222220;
+  --dark-bevel-lo-outer: #0C0C0B;
   color-scheme: light dark;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #262624;
-    --surface: #30302E;
-    --text: #E8E6E3;
-    --muted: #A0A09B;
-    --border: #3E3E3C;
-    --accent: #D4A27F;
-    --bevel-face: #3A3A35;
-    --bevel-face-hover: #42423D;
-    --bevel-hi-outer: #66665F;
-    --bevel-hi-inner: #505049;
-    --bevel-lo-inner: #222220;
-    --bevel-lo-outer: #0C0C0B;
+  :root:not([data-theme="light"]) {
+    --bg: var(--dark-bg);
+    --surface: var(--dark-surface);
+    --text: var(--dark-text);
+    --muted: var(--dark-muted);
+    --border: var(--dark-border);
+    --accent: var(--dark-accent);
+    --bevel-face: var(--dark-bevel-face);
+    --bevel-face-hover: var(--dark-bevel-face-hover);
+    --bevel-hi-outer: var(--dark-bevel-hi-outer);
+    --bevel-hi-inner: var(--dark-bevel-hi-inner);
+    --bevel-lo-inner: var(--dark-bevel-lo-inner);
+    --bevel-lo-outer: var(--dark-bevel-lo-outer);
+    color-scheme: dark;
   }
+}
+
+:root[data-theme="light"] { color-scheme: light; }
+
+:root[data-theme="dark"] {
+  --bg: var(--dark-bg);
+  --surface: var(--dark-surface);
+  --text: var(--dark-text);
+  --muted: var(--dark-muted);
+  --border: var(--dark-border);
+  --accent: var(--dark-accent);
+  --bevel-face: var(--dark-bevel-face);
+  --bevel-face-hover: var(--dark-bevel-face-hover);
+  --bevel-hi-outer: var(--dark-bevel-hi-outer);
+  --bevel-hi-inner: var(--dark-bevel-hi-inner);
+  --bevel-lo-inner: var(--dark-bevel-lo-inner);
+  --bevel-lo-outer: var(--dark-bevel-lo-outer);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
