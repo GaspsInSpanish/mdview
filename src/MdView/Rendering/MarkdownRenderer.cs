@@ -15,7 +15,12 @@ internal static class MarkdownRenderer
     private static MarkdownPipeline BuildPipeline()
     {
         var builder = new MarkdownPipelineBuilder()
-            .UseAdvancedExtensions()
+            .UseAutoLinks()
+            .UseDefinitionLists()
+            .UseEmphasisExtras()
+            .UseFootnotes()
+            .UsePipeTables()
+            .UseTaskLists()
             .UseAutoIdentifiers(AutoIdentifierOptions.GitHub)
             .UsePreciseSourceLocation()
             .DisableHtml();

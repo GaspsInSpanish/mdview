@@ -196,10 +196,13 @@ public sealed class ReaderServer : IDisposable
                 return;
             }
 
-            var html = Renderer.RenderDocument(document.Kind, source, document.Title, document.Id, writeToken);
+            var nonce = Renderer.CreateNonce();
+            var contentSecurityPolicy = Renderer.CreateContentSecurityPolicy(nonce);
+            var html = Renderer.RenderDocument(document.Kind, source, document.Title, document.Id, writeToken, nonce);
             var bytes = Encoding.UTF8.GetBytes(html);
             context.Response.StatusCode = (int)HttpStatusCode.OK;
             context.Response.ContentType = "text/html; charset=utf-8";
+            context.Response.Headers["Content-Security-Policy"] = contentSecurityPolicy;
             context.Response.ContentLength64 = bytes.Length;
             await context.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
         }

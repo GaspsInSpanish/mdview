@@ -57,8 +57,24 @@ It is a *reading* tool. It does not edit, and it has no UI chrome of its own.
 - **Never leave an orphaned process.** The server exits when its last reader window
   disconnects. A user who closes every Brave window must not have a `mdview.exe`
   lingering in Task Manager.
-- Markdown rendering is **untrusted input**: render with raw HTML disabled in Markdig,
-  so a `.md` file cannot inject script into the reader window.
+- Markdown rendering is **untrusted input.** `DisableHtml()` is **not** sufficient and
+  must never be cited as if it were — it blocks raw HTML *blocks* and nothing else.
+  It has now failed to cover two distinct injection paths in this project:
+  **URI schemes** (`javascript:` in an ordinary link — fixed in `S1-URI`) and
+  **attributes** (`{onerror="…"}` via Markdig's `GenericAttributes`, which
+  `UseAdvancedExtensions()` enables implicitly — a live XSS in shipped v1.1.0, fixed
+  in `S6-XSS`).
+  The standing rules that follow from that:
+  - **Never call `UseAdvancedExtensions()`.** Enumerate extensions explicitly. Before
+    adding one, ask what HTML and which attributes it lets *document content* emit.
+  - The post-render sanitizer allowlists both **URI schemes** and **attributes**, and
+    strips every `on*` unconditionally. Treat it as load-bearing, not belt-and-braces.
+  - The served page carries a **CSP with a per-response script nonce and no
+    `'unsafe-inline'`**, which structurally kills inline handlers. Never weaken
+    `script-src` or `connect-src` to make something work — report it instead.
+  - When scanning rendered HTML in a test, parse it structurally. The page embeds
+    highlight.js, whose source contains literal `<script`/`<style>` patterns; naive
+    regex scans have produced false results twice.
 - No hardcoded path separators or literal `~`. Build paths with `Path.Combine` and
   `Environment.GetFolderPath`.
 

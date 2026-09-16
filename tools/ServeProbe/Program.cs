@@ -18,9 +18,14 @@ if (args.Length == 1 && args[0] == "--toggle")
     return await RunToggleChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--security")
+{
+    return await RunSecurityChecksAsync();
+}
+
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security");
     return 1;
 }
 
@@ -59,6 +64,91 @@ static async Task<int> RunToggleChecksAsync()
     return failed ? 1 : 0;
 }
 
+static async Task<int> RunSecurityChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("security-event-handlers", CheckEventHandlerVectorsAsync);
+    failed |= !await RunCheckAsync("security-attribute-allowlist", CheckAttributeAllowlistAsync);
+    failed |= !await RunCheckAsync("security-uri-regression", CheckSecurityUrisAsync);
+    failed |= !await RunCheckAsync("security-csp-and-functionality", CheckCspAndFunctionalityAsync);
+    return failed ? 1 : 0;
+}
+
+static Task CheckEventHandlerVectorsAsync()
+{
+    const string markdown = """
+        ![x](missing.png){onerror="alert(1)"}
+        [link](https://example.com){onclick="alert(2)"}
+        ## Heading {onmouseover="alert(3)"}
+        ```csharp {onmouseover="alert(9)"}
+        Console.WriteLine("safe");
+        ```
+        """;
+    var html = Renderer.RenderDocument(markdown, "vectors");
+    var openingTags = string.Join('\n', GetOpeningTags(html));
+    Ensure(!Regex.IsMatch(openingTags, @"\s+on[a-z0-9_-]*\s*=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+        "Rendered HTML retained an event-handler attribute.");
+    return Task.CompletedTask;
+}
+
+static Task CheckAttributeAllowlistAsync()
+{
+    const string hostile = "<img\n src=\"safe.png\" alt=\"x\" STYLE=\"color:red\" srcset=\"evil 2x\" formaction=\"https://evil\" onerror=\"alert(1)\" data-unknown=\"x\">";
+    var sanitized = UriSanitizer.SanitizeHtml(hostile);
+    Ensure(sanitized.Contains("src=\"safe.png\"", StringComparison.Ordinal) &&
+        sanitized.Contains("alt=\"x\"", StringComparison.Ordinal), "Allowlisted attributes were removed.");
+    foreach (var forbidden in new[] { "style=", "srcset=", "formaction=", "onerror=", "data-unknown=" })
+        Ensure(!sanitized.Contains(forbidden, StringComparison.OrdinalIgnoreCase), $"Sanitizer retained {forbidden}");
+    return Task.CompletedTask;
+}
+
+static Task CheckSecurityUrisAsync()
+{
+    const string markdown = """
+        [http](http://example.com) [https](https://example.com) [mail](mailto:test@example.com) [file](file:///tmp/a) [relative](docs/readme.md)
+        ![data](data:image/png;base64,AA==)
+        [js](javascript:alert(1)) [vb](vbscript:msgbox(1)) [encoded](&#x6a;avascript:alert(1)) ![html](data:text/html;base64,PHNjcmlwdD4=)
+        """;
+    var html = Renderer.RenderDocument(markdown, "uris");
+    foreach (var safe in new[] { "http://example.com", "https://example.com", "mailto:test@example.com", "file:///tmp/a", "docs/readme.md", "data:image/png;base64,AA==" })
+        Ensure(html.Contains(safe, StringComparison.Ordinal), $"Safe URI was removed: {safe}");
+    var openingTags = string.Join('\n', GetOpeningTags(html));
+    Ensure(!Regex.IsMatch(openingTags, "(?:href|src)\\s*=\\s*[\\\"']?(?:javascript|vbscript|data:text/html):",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant), "Dangerous URI survived in an active attribute.");
+    return Task.CompletedTask;
+}
+
+static async Task CheckCspAndFunctionalityAsync()
+{
+    const string probeNonce = "probe-nonce";
+    EnsureExecutableTagsHaveNonce(
+        Renderer.RenderDocument(DocumentKind.Markdown, "# CSP probe", "probe", cspNonce: probeNonce), probeNonce);
+    await using var fixture = await ToggleFixture.CreateAsync("- [ ] secured\n");
+    var policy = fixture.ContentSecurityPolicy ?? throw new InvalidOperationException("CSP response header was missing.");
+    Ensure(!policy.Contains("'unsafe-inline'", StringComparison.OrdinalIgnoreCase), "CSP permits unsafe inline script.");
+    Ensure(Regex.IsMatch(policy, @"(?:^|;\s*)img-src\s+'self'\s+data:\s+https:(?:;|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant), "CSP img-src did not allow self, data, and HTTPS images.");
+    var nonceMatch = Regex.Match(policy, @"(?:^|;\s*)script-src\s+'nonce-(?<nonce>[^']+)'(?:;|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    Ensure(nonceMatch.Success, "script-src did not contain exactly a nonce source.");
+    var nonce = nonceMatch.Groups["nonce"].Value;
+    var metaMatch = Regex.Match(fixture.Html, "<meta\\s+http-equiv=\\\"Content-Security-Policy\\\"\\s+content=\\\"(?<policy>[^\\\"]+)\\\">",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    Ensure(metaMatch.Success && metaMatch.Groups["policy"].Value == policy, "Meta CSP did not exactly match the response header.");
+    EnsureExecutableTagsHaveNonce(fixture.Html, nonce);
+    Ensure(fixture.Html.Contains("hljs.highlightAll()", StringComparison.Ordinal), "Highlight initialization was missing.");
+    var secondPolicy = await fixture.FetchContentSecurityPolicyAsync();
+    Ensure(secondPolicy is not null, "CSP response header was missing on a subsequent response.");
+    Ensure(!string.Equals(secondPolicy, policy, StringComparison.Ordinal), "CSP nonce was reused across responses.");
+
+    await using var events = await fixture.ConnectEventsAsync();
+    EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.NoContent);
+    EnsureBytes(fixture.Path, "- [x] secured\n");
+    Ensure(!await events.HasReloadAsync(TimeSpan.FromSeconds(2)), "Own toggle produced a reload under CSP.");
+    await File.AppendAllTextAsync(fixture.Path, "external\n", new UTF8Encoding(false));
+    Ensure(await events.HasReloadAsync(TimeSpan.FromSeconds(8)), "SSE did not deliver an external reload under CSP.");
+}
+
 static async Task<bool> RunCheckAsync(string name, Func<Task> check)
 {
     try
@@ -75,6 +165,62 @@ static async Task<bool> RunCheckAsync(string name, Func<Task> check)
 }
 
 static string SingleLine(string value) => value.Replace('\r', ' ').Replace('\n', ' ');
+
+static void EnsureExecutableTagsHaveNonce(string html, string nonce)
+{
+    var executableTags = GetOpeningTags(html)
+        .Where(tag => Regex.IsMatch(tag, @"^<(?:script|style)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        .ToArray();
+    Ensure(executableTags.Length > 0, "Rendered document contained no script or style elements.");
+    Ensure(executableTags.All(tag => Regex.IsMatch(tag, $"\\snonce=\\\"{Regex.Escape(nonce)}\\\"(?:\\s|>)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)), "An inline script or style did not carry the CSP nonce.");
+}
+
+static IReadOnlyList<string> GetOpeningTags(string html)
+{
+    var tags = new List<string>();
+    var position = 0;
+    while (position < html.Length)
+    {
+        var start = html.IndexOf('<', position);
+        if (start < 0 || start + 1 >= html.Length) break;
+        if (!char.IsAsciiLetter(html[start + 1]))
+        {
+            position = start + 1;
+            continue;
+        }
+
+        var nameEnd = start + 2;
+        while (nameEnd < html.Length && (char.IsAsciiLetterOrDigit(html[nameEnd]) || html[nameEnd] is '-' or ':')) nameEnd++;
+        var name = html[(start + 1)..nameEnd];
+        var quote = '\0';
+        var end = nameEnd;
+        for (; end < html.Length; end++)
+        {
+            var character = html[end];
+            if (quote != '\0')
+            {
+                if (character == quote) quote = '\0';
+                continue;
+            }
+            if (character is '\'' or '"') quote = character;
+            else if (character == '>') break;
+        }
+        if (end >= html.Length) throw new InvalidOperationException($"Unterminated <{name}> element in rendered HTML.");
+
+        tags.Add(html[start..(end + 1)]);
+        position = end + 1;
+        if (!name.Equals("script", StringComparison.OrdinalIgnoreCase) &&
+            !name.Equals("style", StringComparison.OrdinalIgnoreCase)) continue;
+
+        var closingStart = html.IndexOf($"</{name}", position, StringComparison.OrdinalIgnoreCase);
+        if (closingStart < 0) throw new InvalidOperationException($"Rendered <{name}> element had no closing tag.");
+        var closingEnd = html.IndexOf('>', closingStart);
+        if (closingEnd < 0) throw new InvalidOperationException($"Unterminated </{name}> element in rendered HTML.");
+        position = closingEnd + 1;
+    }
+    return tags;
+}
 
 static async Task CheckBasicToggleAsync()
 {
@@ -193,7 +339,7 @@ static Task CheckUriSanitizerAsync()
 {
     var html = Renderer.RenderDocument("[safe](https://example.com) [bad](javascript:alert(1))", "uris");
     Ensure(html.Contains("href=\"https://example.com\"", StringComparison.Ordinal), "Safe URI was removed.");
-    Ensure(!Regex.IsMatch(html, "(?:href|src)\\s*=\\s*[\\\"']?javascript:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+    Ensure(!Regex.IsMatch(string.Join('\n', GetOpeningTags(html)), "(?:href|src)\\s*=\\s*[\\\"']?javascript:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
         "Unsafe javascript URI survived in an HTML attribute.");
     return Task.CompletedTask;
 }
@@ -430,7 +576,8 @@ sealed class ToggleFixture : IAsyncDisposable
     private readonly ReaderServer server;
     private readonly HttpClient client = new();
 
-    private ToggleFixture(string directory, string path, ReaderServer server, string id, string token, string html)
+    private ToggleFixture(string directory, string path, ReaderServer server, string id, string token, string html,
+        string? contentSecurityPolicy)
     {
         this.directory = directory;
         this.server = server;
@@ -438,12 +585,14 @@ sealed class ToggleFixture : IAsyncDisposable
         Id = id;
         Token = token;
         Html = html;
+        ContentSecurityPolicy = contentSecurityPolicy;
     }
 
     internal string Path { get; }
     internal string Id { get; }
     internal string Token { get; }
     internal string Html { get; }
+    internal string? ContentSecurityPolicy { get; }
 
     internal static Task<ToggleFixture> CreateAsync(string source) =>
         CreateAsync(Encoding.UTF8.GetBytes(source));
@@ -460,14 +609,19 @@ sealed class ToggleFixture : IAsyncDisposable
             server.Start();
             var document = server.RegisterDocument(path);
             using var client = new HttpClient();
-            var html = await client.GetStringAsync($"http://127.0.0.1:{server.Port}/d/{document.Id}");
+            using var response = await client.GetAsync($"http://127.0.0.1:{server.Port}/d/{document.Id}");
+            response.EnsureSuccessStatusCode();
+            var html = await response.Content.ReadAsStringAsync();
+            var contentSecurityPolicy = response.Headers.TryGetValues("Content-Security-Policy", out var policies)
+                ? policies.Single()
+                : null;
             var match = ToggleConfiguration.Match(html);
             if (!match.Success) throw new InvalidOperationException("Rendered document did not expose toggle configuration.");
             var renderedId = JsonSerializer.Deserialize<string>(match.Groups["id"].Value);
             var token = JsonSerializer.Deserialize<string>(match.Groups["token"].Value);
             if (renderedId != document.Id || string.IsNullOrEmpty(token))
                 throw new InvalidOperationException("Rendered toggle configuration was invalid.");
-            return new ToggleFixture(directory, path, server, document.Id, token, html);
+            return new ToggleFixture(directory, path, server, document.Id, token, html, contentSecurityPolicy);
         }
         catch
         {
@@ -513,6 +667,13 @@ sealed class ToggleFixture : IAsyncDisposable
             eventClient.Dispose();
             throw;
         }
+    }
+
+    internal async Task<string?> FetchContentSecurityPolicyAsync()
+    {
+        using var response = await client.GetAsync($"http://127.0.0.1:{server.Port}/d/{Id}");
+        response.EnsureSuccessStatusCode();
+        return response.Headers.TryGetValues("Content-Security-Policy", out var policies) ? policies.Single() : null;
     }
 
     public ValueTask DisposeAsync()
