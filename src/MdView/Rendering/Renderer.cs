@@ -58,28 +58,74 @@ public static class Renderer
         html.AppendLine(Assets.LoadTheme());
         html.AppendLine("</style>");
         html.AppendLine("</head>");
-        html.AppendLine("<body>");
-        html.AppendLine("<main>");
+        html.AppendLine("<body tabindex=\"-1\">");
+        AppendMenuBar(html);
+        html.AppendLine("<main id=\"reader-content\" tabindex=\"-1\">");
         html.Append(body);
         html.AppendLine("</main>");
         html.Append("<script nonce=\"").Append(cspNonce).AppendLine("\">");
         html.Append("window.mdviewToggle={id:").Append(System.Text.Json.JsonSerializer.Serialize(documentId)).Append(",token:").Append(System.Text.Json.JsonSerializer.Serialize(writeToken)).AppendLine("};");
-        html.AppendLine("document.addEventListener('change',async e=>{const b=e.target;if(!b.matches('input[data-line]'))return;const old=!b.checked;b.disabled=true;try{const r=await fetch('/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:window.mdviewToggle.id,line:+b.dataset.line,checked:old,token:window.mdviewToggle.token})});if(r.status===409){location.reload();return;}if(!r.ok)throw 0;}catch{b.checked=old;alert('Checkbox change was not saved.');}finally{b.disabled=false;}});");
         html.AppendLine("</script>");
+        AppendScript(html, cspNonce, Assets.LoadScript("page.js"));
+        AppendScript(html, cspNonce, Assets.LoadScript("menu.js"));
 
         foreach (var script in HighlightScripts)
         {
-            html.Append("<script nonce=\"").Append(cspNonce).AppendLine("\">");
-            html.AppendLine(Assets.LoadScript(script));
-            html.AppendLine("</script>");
+            AppendScript(html, cspNonce, Assets.LoadScript(script));
         }
 
-        html.Append("<script nonce=\"").Append(cspNonce).AppendLine("\">");
-        html.AppendLine("document.addEventListener('DOMContentLoaded', () => hljs.highlightAll());");
-        html.AppendLine("</script>");
         html.AppendLine("</body>");
         html.AppendLine("</html>");
         return html.ToString();
+    }
+
+    private static void AppendMenuBar(StringBuilder html)
+    {
+        html.AppendLine("<nav class=\"menu-bar\" role=\"menubar\" aria-label=\"Application menu\">");
+        AppendMenu(html, "file", "File",
+            [("New", "Ctrl+N", "file.new"), ("Open…", "Ctrl+O", "file.open"),
+             ("Save As…", "Ctrl+Shift+S", "file.save-as"), ("Exit", "Alt+F4", "file.exit")], 3);
+        AppendMenu(html, "edit", "Edit",
+            [("Copy", "Ctrl+C", "edit.copy"), ("Select All", "Ctrl+A", "edit.select-all"),
+             ("Find…", "Ctrl+F", "edit.find")]);
+        AppendThemeMenu(html);
+        html.AppendLine("</nav>");
+    }
+
+    private static void AppendMenu(StringBuilder html, string id, string label,
+        (string Label, string Accelerator, string Command)[] items, int separatorBefore = -1)
+    {
+        html.Append("<div class=\"menu\" data-menu=\"").Append(id).AppendLine("\">");
+        html.Append("<button class=\"menu-button\" type=\"button\" role=\"menuitem\" aria-haspopup=\"true\" aria-expanded=\"false\" aria-controls=\"menu-")
+            .Append(id).Append("\">").Append(label).AppendLine("</button>");
+        html.Append("<div class=\"menu-panel\" id=\"menu-").Append(id).AppendLine("\" role=\"menu\" hidden>");
+        for (var index = 0; index < items.Length; index++)
+        {
+            if (index == separatorBefore) html.AppendLine("<div class=\"menu-separator\" role=\"separator\"></div>");
+            var item = items[index];
+            html.Append("<button class=\"menu-item\" type=\"button\" role=\"menuitem\" tabindex=\"-1\" data-command=\"")
+                .Append(item.Command).Append("\"><span>").Append(item.Label).Append("</span><span class=\"menu-accelerator\">")
+                .Append(item.Accelerator).AppendLine("</span></button>");
+        }
+        html.AppendLine("</div></div>");
+    }
+
+    private static void AppendThemeMenu(StringBuilder html)
+    {
+        html.AppendLine("<div class=\"menu menu-theme\" data-menu=\"theme\">");
+        html.AppendLine("<button class=\"menu-button\" type=\"button\" role=\"menuitem\" aria-haspopup=\"true\" aria-expanded=\"false\" aria-controls=\"menu-theme\">Theme</button>");
+        html.AppendLine("<div class=\"menu-panel\" id=\"menu-theme\" role=\"menu\" hidden>");
+        html.AppendLine("<button class=\"menu-item menu-radio\" type=\"button\" role=\"menuitemradio\" aria-checked=\"true\" tabindex=\"-1\" data-command=\"theme.system\"><span>System</span><span class=\"menu-accelerator\"></span></button>");
+        html.AppendLine("<button class=\"menu-item menu-radio\" type=\"button\" role=\"menuitemradio\" aria-checked=\"false\" tabindex=\"-1\" data-command=\"theme.light\"><span>Light</span><span class=\"menu-accelerator\"></span></button>");
+        html.AppendLine("<button class=\"menu-item menu-radio\" type=\"button\" role=\"menuitemradio\" aria-checked=\"false\" tabindex=\"-1\" data-command=\"theme.dark\"><span>Dark</span><span class=\"menu-accelerator\"></span></button>");
+        html.AppendLine("</div></div>");
+    }
+
+    private static void AppendScript(StringBuilder html, string nonce, string script)
+    {
+        html.Append("<script nonce=\"").Append(nonce).AppendLine("\">");
+        html.AppendLine(script);
+        html.AppendLine("</script>");
     }
 
     internal static string CreateNonce() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(24));

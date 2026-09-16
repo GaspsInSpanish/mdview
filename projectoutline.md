@@ -215,6 +215,46 @@ silently modify files the user has open. A random per-process token embedded in 
 page, plus an `Origin` check, keeps the write path reachable only from our own page.
 The document id alone is not sufficient: it is visible in the browser's URL.
 
+## 5a. v1.2 — Menu bar (planned 2026-09-16)
+
+A Win98-styled menu bar drawn **in HTML inside the page**. Brave `--app` windows have
+no native chrome to attach a real menu to, so the bar is ours to paint — which is also
+what makes the retro geometry a free styling choice.
+
+**Visual:** Win98 *geometry* — square corners, hard 2px bevels, no radius, no soft
+shadows, pressed state inverts the bevel — drawn from the existing palette tokens so
+it tracks light/dark. Not authentic `#C0C0C0` gray; the owner chose themed over
+period-accurate so the bar doesn't glare at night.
+
+**Menus:** File (New, Open…, Save As…, Exit) · Edit (Copy, Select All, Find…) ·
+Theme (System, Light, Dark).
+
+**Packets:**
+
+| # | Scope | Risk | WSL-verifiable? |
+|---|---|---|---|
+| M1 | Bar + dropdown shell, Win98 bevel CSS, keyboard nav. Items no-op | Low | Yes, fully |
+| M2 | Theme tri-state persisted to `config.json`; `GET`/`POST /config` | Medium | Mostly |
+| M3 | Native `IFileOpenDialog`/`IFileSaveDialog` via COM P/Invoke; Open, Save As, New | **High** | No — Windows only |
+| M4 | Edit menu: Copy, Select All, custom in-page Find | Medium | Mostly |
+
+**Decisions taken up front:**
+
+- **Native dialogs via COM P/Invoke, not WinForms.** Measured: `UseWindowsForms=true`
+  takes the exe from 33.7 MB to **68.5 MB** (installer ~31 → ~63 MB) for two dialogs.
+  P/Invoking `IFileOpenDialog`/`IFileSaveDialog` costs implementation effort and zero
+  bytes. (Also note WinForms cross-building from WSL needs `EnableWindowsTargeting=true`.)
+- **The page never supplies a filesystem path.** The page requests an action; the .NET
+  side opens the native dialog; the user picks; the app acts. This preserves "serve
+  only files explicitly opened by the user" while adding Open and Save As.
+- **Theme preference lives in `%APPDATA%\mdview\config.json`, never `localStorage`.**
+  The server's port falls back 7717→7817 when taken, and a different port is a
+  different browser origin, so `localStorage` would silently lose the setting.
+- **Save As copies the current `.md` to a user-chosen path** (Notepad semantics), not
+  an HTML export. Toggled checkboxes are already persisted, so a copy captures them.
+- **Find must be implemented in-page.** A page cannot open Brave's native find bar
+  programmatically.
+
 ## 6. Roadmap — post-v1
 
 **v1 = `.md` only.** Nothing below is in scope until v1 ships.
