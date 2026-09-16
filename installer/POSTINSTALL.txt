@@ -1,0 +1,3 @@
+mdview has registered itself as an available app for Markdown files.
+
+Windows 8 and later require you to confirm the default app yourself. The first time you double-click a .md file, Windows may show a "How do you want to open this file?" picker. Choose mdview there to make it the default. You can also use the optional Default Apps link on this page.

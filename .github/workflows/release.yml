@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (for example, 1.2.3 or v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Derive version
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}' }
+          $version = $tag -replace '^v', ''
+          if ([string]::IsNullOrWhiteSpace($version)) { throw 'A release version is required.' }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Publish mdview
+        shell: pwsh
+        run: dotnet publish src/MdView/MdView.csproj -c Release -r win-x64 -p:Version=$env:VERSION
+
+      - name: Ensure Inno Setup is available
+        shell: pwsh
+        run: |
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            choco install innosetup --no-progress --yes
+            $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          }
+          $isccPath = if ($iscc) { $iscc.Source } else { "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $isccPath)) { throw 'Inno Setup could not be located after installation.' }
+          "ISCC=$isccPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build installer
+        shell: pwsh
+        run: '& "$env:ISCC" "/DAppVersion=$env:VERSION" "installer\mdview.iss"'
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $installer = "installer\Output\mdview-setup-$env:VERSION.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $installer)" | Set-Content -NoNewline "${installer}.sha256"
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$env:VERSION" "installer\Output\mdview-setup-$env:VERSION.exe" "installer\Output\mdview-setup-$env:VERSION.exe.sha256" --target "$env:GITHUB_SHA" --title "mdview $env:VERSION" --generate-notes
