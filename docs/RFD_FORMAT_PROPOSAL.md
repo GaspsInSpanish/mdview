@@ -57,7 +57,9 @@ output:  <h1 id="custom-id" class="fancy" onclick="alert(1)">Heading attrs</h1>
 - It can exfiltrate the rendered document — i.e. the contents of the user's local file — to any host via `fetch`, `img`, or navigation. There is no CSP on the page.
 - It runs in the user's real Brave profile (`--app=` uses the default profile by design, per the §5 decision log), so it inherits whatever that profile can reach.
 
-**This is the same root cause as `S1-URI`, for the third time.** The `TASK_LOG` records `S1-URI` as "PM spec gap, not worker error — `DisableHtml()` does not cover URIs." It also does not cover attributes. The generalizable lesson, which belongs in `AGENTS.md`:
+**This is the same root cause as `S1-URI`, for the second time.** *(PM note: the
+agent wrote "third"; I could substantiate two — `S1-URI`, caught in review before
+release, and this one, which shipped.)* The `TASK_LOG` records `S1-URI` as "PM spec gap, not worker error — `DisableHtml()` does not cover URIs." It also does not cover attributes. The generalizable lesson, which belongs in `AGENTS.md`:
 
 > `UseAdvancedExtensions()` is an unbounded allowlist of HTML-emission surfaces. Every extension it enables is a place untrusted input reaches the DOM. Enumerate extensions explicitly; never enable a bundle.
 

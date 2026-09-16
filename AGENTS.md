@@ -57,8 +57,10 @@ It is a *reading* tool. It does not edit, and it has no UI chrome of its own.
 - **Never leave an orphaned process.** The server exits when its last reader window
   disconnects. A user who closes every Brave window must not have a `mdview.exe`
   lingering in Task Manager.
-- Markdown rendering is **untrusted input.** `DisableHtml()` is **not** sufficient and
-  must never be cited as if it were — it blocks raw HTML *blocks* and nothing else.
+- Markdown rendering is **untrusted input.** *(Rule rewritten 2026-09-16 after
+  `S6-XSS`; the previous wording asserted `DisableHtml()` was sufficient and was
+  coded against silently until it shipped a vulnerability.)* `DisableHtml()` is
+  **not** sufficient and must never be cited as if it were — it blocks raw HTML *blocks* and nothing else.
   It has now failed to cover two distinct injection paths in this project:
   **URI schemes** (`javascript:` in an ordinary link — fixed in `S1-URI`) and
   **attributes** (`{onerror="…"}` via Markdig's `GenericAttributes`, which

@@ -91,8 +91,15 @@ mdview.exe  --- Mutex "Local\mdview-singleton" already held? ---+
 - **Loopback-only bind.** `127.0.0.1`, never `+`/`0.0.0.0`. This serves local file
   contents; a LAN bind is a disclosure bug, and a non-loopback `HttpListener` prefix
   needs admin, which would break a normal-user install.
-- **Raw HTML disabled in Markdig.** A `.md` is untrusted input; it must not inject
-  script into the reader window.
+- **Untrusted input, defended in three layers** *(corrected 2026-09-16; the original
+  single-layer claim here was wrong and contributed to the `S6-XSS` incident)*. A `.md`
+  is untrusted input. `DisableHtml()` alone does **not** prevent injection — it blocks
+  raw HTML *blocks* and nothing else, and has now missed two distinct paths (URI
+  schemes in `S1-URI`, attributes in `S6-XSS`). The actual controls are:
+  (1) extensions enumerated explicitly, never `UseAdvancedExtensions()`;
+  (2) the sanitizer allowlisting both URI schemes and attributes, stripping every
+  `on*` unconditionally; (3) a CSP with a per-response script nonce and no
+  `'unsafe-inline'`. See `AGENTS.md` for the binding form of these rules.
 - **One process, many windows.** Avoids a port and a tray icon per open file.
 - **Handshake file** at `%LOCALAPPDATA%\mdview\instance.json` (`{port, pid}`) so a
   second invocation finds the first. Stale file (pid dead / port closed) is
