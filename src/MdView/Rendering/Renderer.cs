@@ -72,6 +72,7 @@ public static class Renderer
         html.Append("window.mdviewToggle={id:").Append(System.Text.Json.JsonSerializer.Serialize(documentId)).Append(",token:").Append(System.Text.Json.JsonSerializer.Serialize(writeToken)).AppendLine("};");
         html.AppendLine("</script>");
         AppendScript(html, cspNonce, Assets.LoadScript("page.js"));
+        AppendScript(html, cspNonce, Assets.LoadScript("fold.js"));
         AppendScript(html, cspNonce, Assets.LoadScript("menu.js"));
 
         foreach (var script in HighlightScripts)
@@ -93,6 +94,8 @@ public static class Renderer
         AppendMenu(html, "edit", "Edit",
             [("Copy", "Ctrl+C", "edit.copy"), ("Select All", "Ctrl+A", "edit.select-all"),
              ("Find…", "Ctrl+F", "edit.find")]);
+        AppendMenu(html, "view", "View",
+            [("Collapse All", "", "view.collapse-all"), ("Expand All", "", "view.expand-all")]);
         AppendThemeMenu(html, theme);
         html.AppendLine("</nav>");
     }

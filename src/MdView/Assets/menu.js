@@ -99,6 +99,7 @@
         if (!node.data) return NodeFilter.FILTER_REJECT;
         const element = node.parentElement;
         if (!element || element.closest('[hidden], [aria-hidden="true"]')) return NodeFilter.FILTER_REJECT;
+        if (element.closest('[data-fold-hidden]')) return NodeFilter.FILTER_ACCEPT;
         const style = getComputedStyle(element);
         return style.display === 'none' || style.visibility === 'hidden'
           ? NodeFilter.FILTER_REJECT
@@ -145,6 +146,7 @@
 
   function showCurrentMatch(scroll = true) {
     clearHighlights();
+    if (findRanges.length) window.mdviewFold?.reveal(findRanges[currentMatch].startContainer);
     if (canHighlight && findRanges.length) {
       CSS.highlights.set(highlightNames[0], new Highlight(...findRanges));
       CSS.highlights.set(highlightNames[1], new Highlight(findRanges[currentMatch]));
@@ -251,6 +253,10 @@
           selectDocument();
         } else if (command === 'edit.find') {
           restoreDocument = !openFind();
+        } else if (command === 'view.collapse-all') {
+          window.mdviewFold?.collapseAll();
+        } else if (command === 'view.expand-all') {
+          window.mdviewFold?.expandAll();
         }
         closeMenu(restoreDocument);
       });

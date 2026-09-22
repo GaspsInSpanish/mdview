@@ -308,6 +308,36 @@ h4 { font-size: 1.1rem; }
 h5 { font-size: 1rem; }
 h6 { color: var(--muted); font-size: 0.9rem; }
 
+[data-fold-hidden] { display: none; }
+
+h1[aria-expanded], h2[aria-expanded], h3[aria-expanded],
+h4[aria-expanded], h5[aria-expanded], h6[aria-expanded] {
+  position: relative;
+  cursor: pointer;
+}
+
+/* The chevron hangs in the left gutter. That gutter is only ~16px once the
+   column stops being centred, so the deeper offset is earned from spare
+   viewport width instead of applied flat: a fixed -30px renders off-screen
+   below roughly 780px wide, which is the M5-PANELPOS defect again. */
+h1[aria-expanded]::before, h2[aria-expanded]::before, h3[aria-expanded]::before,
+h4[aria-expanded]::before, h5[aria-expanded]::before, h6[aria-expanded]::before {
+  position: absolute;
+  left: calc(-14px - min(16px, max(0px, (100vw - 47rem) / 2)));
+  content: "\25BE";
+  color: var(--muted);
+}
+
+h1[aria-expanded="false"]::before, h2[aria-expanded="false"]::before,
+h3[aria-expanded="false"]::before, h4[aria-expanded="false"]::before,
+h5[aria-expanded="false"]::before, h6[aria-expanded="false"]::before { content: "\25B8"; }
+
+h1[aria-expanded]:focus-visible, h2[aria-expanded]:focus-visible, h3[aria-expanded]:focus-visible,
+h4[aria-expanded]:focus-visible, h5[aria-expanded]:focus-visible, h6[aria-expanded]:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
 p { margin: 0 0 1.15em; }
 ul, ol { margin: 0 0 1.15em; padding-left: 1.5em; }
 li > ul, li > ol { margin-bottom: 0; }

@@ -25,14 +25,15 @@ static void ValidateMenuShell(string html)
 {
     var tags = GetOpeningTags(html);
     var menuTags = tags.Where(tag => HasAttribute(tag, "data-menu")).ToArray();
-    Ensure(menuTags.Length == 3, $"Expected exactly three menus, found {menuTags.Length}.");
-    foreach (var menu in new[] { "file", "edit", "theme" })
+    Ensure(menuTags.Length == 4, $"Expected exactly four menus, found {menuTags.Length}.");
+    foreach (var menu in new[] { "file", "edit", "view", "theme" })
         Ensure(menuTags.Count(tag => HasAttribute(tag, "data-menu", menu)) == 1, $"Menu '{menu}' was missing or duplicated.");
 
     var expectedCommands = new[]
     {
         "file.new", "file.open", "file.save-as", "file.exit",
         "edit.copy", "edit.select-all", "edit.find",
+        "view.collapse-all", "view.expand-all",
         "theme.system", "theme.light", "theme.dark"
     };
     var commandTags = tags.Where(tag => HasAttribute(tag, "data-command")).ToArray();
@@ -44,15 +45,15 @@ static void ValidateMenuShell(string html)
     var shellEnd = html.IndexOf("<script", StringComparison.OrdinalIgnoreCase);
     Ensure(shellEnd >= 0, "Rendered document had no scripts.");
     var shell = html[..shellEnd];
-    foreach (var label in new[] { ">File<", ">New<", ">Open…<", ">Save As…<", ">Exit<", ">Edit<", ">Copy<", ">Select All<", ">Find…<", ">Theme<", ">System<", ">Light<", ">Dark<" })
+    foreach (var label in new[] { ">File<", ">New<", ">Open…<", ">Save As…<", ">Exit<", ">Edit<", ">Copy<", ">Select All<", ">Find…<", ">View<", ">Collapse All<", ">Expand All<", ">Theme<", ">System<", ">Light<", ">Dark<" })
         Ensure(shell.Contains(label, StringComparison.Ordinal), $"Menu label '{label[1..^1]}' was missing.");
     foreach (var accelerator in new[] { "Ctrl+N", "Ctrl+O", "Ctrl+Shift+S", "Alt+F4", "Ctrl+C", "Ctrl+A", "Ctrl+F" })
         Ensure(shell.Contains($">{accelerator}<", StringComparison.Ordinal), $"Accelerator '{accelerator}' was missing.");
 
     Ensure(tags.Count(tag => HasAttribute(tag, "role", "menubar")) == 1, "Menubar role was missing or duplicated.");
-    Ensure(tags.Count(tag => HasAttribute(tag, "role", "menu")) == 3, "Menu roles were missing.");
-    Ensure(tags.Count(tag => HasAttribute(tag, "aria-expanded", "false")) == 3, "Menu expansion state was missing.");
-    Ensure(tags.Count(tag => HasAttribute(tag, "aria-haspopup", "true")) == 3, "Menu popup semantics were missing.");
+    Ensure(tags.Count(tag => HasAttribute(tag, "role", "menu")) == 4, "Menu roles were missing.");
+    Ensure(tags.Count(tag => HasAttribute(tag, "aria-expanded", "false")) == 4, "Menu expansion state was missing.");
+    Ensure(tags.Count(tag => HasAttribute(tag, "aria-haspopup", "true")) == 4, "Menu popup semantics were missing.");
     Ensure(tags.Count(tag => HasAttribute(tag, "role", "menuitemradio") && HasAttribute(tag, "aria-checked", "true")) == 1,
         "Exactly one theme item must be marked current.");
     Ensure(commandTags.Single(tag => HasAttribute(tag, "data-command", "theme.system"))
@@ -78,10 +79,21 @@ static void ValidateMenuShell(string html)
     Ensure(executableTags.Length > 0, "No inline script or style elements were found.");
     Ensure(executableTags.All(tag => HasAttribute(tag, "nonce", nonce)),
         "An inline script or style was missing the CSP nonce.");
+    Ensure(!tags.Any(tag => Regex.IsMatch(tag, @"\son[a-z]+\s*=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)),
+        "Rendered shell contained an inline event-handler attribute.");
+
+    var foldScript = Assets.LoadScript("fold.js");
+    Ensure(html.Contains(foldScript, StringComparison.Ordinal) &&
+        foldScript.Contains("window.mdviewFold = { reveal, collapseAll, expandAll }", StringComparison.Ordinal),
+        "fold.js was not embedded in the rendered page with the required API.");
 
     var css = Assets.LoadTheme();
     Ensure(Regex.IsMatch(css, @"main\s*\{[^}]*max-width:\s*46rem", RegexOptions.CultureInvariant),
         "The reading column no longer has a 46rem measure.");
+    Ensure(Regex.IsMatch(css, @"\[data-fold-hidden\]\s*\{[^}]*display:\s*none", RegexOptions.CultureInvariant),
+        "Fold-hidden content was not removed from layout.");
+    Ensure(Regex.IsMatch(css, @"\[aria-expanded(?:[^]]*)\]::before\s*[,\{]", RegexOptions.CultureInvariant),
+        "Foldable headings had no chevron pseudo-element rule.");
     ValidateBevelTheme(css, dark: false);
     ValidateBevelTheme(css, dark: true);
     ValidatePressedBevel(css);
