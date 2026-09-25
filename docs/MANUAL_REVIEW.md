@@ -106,7 +106,44 @@ Both are asserted by `GeometryProbe` at 500/784/1184px. The narrow case has
 caught the same class of defect three times (`M5-PANELPOS`, `M6-ALIGN`,
 `M6-NUDGE`), which is why it is still worth a glance by eye.
 
-## 5. Fold state is session-only
+## 5. Elements restored in v1.2.5
+
+These parse again after the extension bundle was banned in v1.1.1. Check each
+renders as described rather than as literal markers.
+
+A grid table — should be a real table. Column widths are **expected** to be
+even rather than the 50/50 the source asks for: `<col style>` is stripped
+because `style` stays off the sanitizer allowlist.
+
++---------+---------+
+| Column  | Column  |
++=========+=========+
+| 1       | 2       |
++---------+---------+
+
+A lettered list — should be `a.` `b.`, not `1.` `2.`:
+
+a. first item
+b. second item
+
+*[HTML]: HyperText Markup Language
+
+An abbreviation — HTML above should have a dotted underline, and a tooltip on
+hover reading "HyperText Markup Language".
+
+A custom container — a neutral bordered panel, **not** styled like the menu
+bar or a callout:
+
+:::warning
+Custom containers are grade C. Prefer a real alert.
+:::
+
+Math is deliberately **not** enabled: the next line should read `$a^2$`
+literally, not as a formula and not as `\(a^2\)`.
+
+Inline math test: $a^2$ — raw dollar signs expected.
+
+## 6. Fold state is session-only
 
 Collapse a few sections, close the window, and open this file again. It should
 come back **fully expanded**, and this file's bytes should be unchanged.

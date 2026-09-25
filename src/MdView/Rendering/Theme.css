@@ -433,6 +433,39 @@ blockquote > :last-child { margin-bottom: 0; }
 .markdown-alert-warning { --alert-accent: var(--alert-warning); --alert-icon: "\26A0\FE0E"; }
 .markdown-alert-caution { --alert-accent: var(--alert-caution); --alert-icon: "\2716"; }
 
+figure {
+  margin: 1.5em 0;
+  text-align: center;
+}
+
+figure img { max-width: 100%; }
+
+figcaption {
+  margin-top: 0.5em;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+abbr[title] {
+  border-bottom: 1px dotted var(--muted);
+  cursor: help;
+  text-decoration: none;
+}
+
+/* Custom containers are grade C in the format proposal — the `:::` markers render as
+   literal text anywhere else — so this is a deliberately neutral treatment rather than
+   an invitation to use them where an alert would do. The class is namespaced by
+   SafeContainerRenderer; never style a bare document-supplied name. */
+.md-container {
+  margin: 1.5em 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface);
+}
+
+.md-container > :last-child { margin-bottom: 0; }
+
 table {
   width: 100%;
   margin: 1.5em 0;

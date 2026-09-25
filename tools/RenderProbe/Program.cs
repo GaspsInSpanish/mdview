@@ -16,6 +16,7 @@ ValidateEditFeatures(document);
 ValidateThemeRendering(markdown, title);
 ValidateAlerts();
 ValidateFrontMatter();
+ValidateExtensions();
 await File.WriteAllTextAsync(args[1], document);
 Console.WriteLine("render-menu=passed");
 Console.WriteLine("render-csp-nonces=passed");
@@ -23,6 +24,7 @@ Console.WriteLine("render-menu-css=passed");
 Console.WriteLine("render-edit=passed");
 Console.WriteLine("render-alerts=passed");
 Console.WriteLine("render-frontmatter=passed");
+Console.WriteLine("render-extensions=passed");
 return 0;
 
 static void ValidateMenuShell(string html)
@@ -289,6 +291,62 @@ static double RelativeLuminance(string color)
 
 static double ContrastRatio(double first, double second) =>
     (Math.Max(first, second) + 0.05) / (Math.Min(first, second) + 0.05);
+
+static void ValidateExtensions()
+{
+    static string Body(string markdown)
+    {
+        var html = Renderer.RenderDocument(markdown, "ext");
+        var body = html[html.IndexOf("<main", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)];
+        return body[(body.IndexOf('>') + 1)..];
+    }
+
+    // Extensions re-enabled after the S6-XSS fix banned the bundle that carried them.
+    Ensure(Body("+---+---+\n| a | b |\n+===+===+\n| 1 | 2 |\n+---+---+").Contains("<table>", StringComparison.Ordinal),
+        "Grid tables no longer parse; the separator row is then eaten by UseEmphasisExtras as ==...==.");
+    Ensure(Body("a. first\nb. second").Contains("""<ol type="a">""", StringComparison.Ordinal),
+        "List extras no longer parse.");
+    Ensure(Body("*[HTML]: HyperText Markup Language\n\nThe HTML spec.")
+        .Contains("""<abbr title="HyperText Markup Language">HTML</abbr>""", StringComparison.Ordinal),
+        "Abbreviations no longer parse.");
+    var figure = Body("^^^\n![i](a.png)\n^^^ A caption");
+    Ensure(figure.Contains("<figure>", StringComparison.Ordinal) && figure.Contains("<figcaption>", StringComparison.Ordinal),
+        "Figures no longer parse.");
+
+    // UseMathematics() is deliberately off: without a typesetting engine it renders
+    // `$a^2$` as a literal `\(a^2\)`, which is worse than the source. Assert the decision
+    // so enabling it requires deciding again rather than drifting in.
+    Ensure(Body("Value $a^2$ here.").Contains("$a^2$", StringComparison.Ordinal),
+        "Math parsing was enabled without a typesetting engine; `$a^2$` now renders as raw \\(a^2\\).");
+
+    // A custom container's name is document text. The stock renderer writes it straight
+    // into a class, so `:::menu-panel` would let a document dress its content up as this
+    // application's own UI. Sweep every class the app styles.
+    string[] chrome =
+    [
+        "menu-bar", "menu", "menu-button", "menu-panel", "menu-item", "menu-separator",
+        "menu-accelerator", "menu-radio", "menu-theme", "find-bar", "find-label", "find-query",
+        "find-status", "find-button", "find-close", "markdown-alert", "markdown-alert-title",
+        "markdown-alert-note", "markdown-alert-caution", "contains-task-list", "task-list-item"
+    ];
+    foreach (var name in chrome)
+        foreach (Match match in Regex.Matches(Body($":::{name}\ncontent\n:::"), @"class=""(?<value>[^""]*)"""))
+            foreach (var emitted in match.Groups["value"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                Ensure(!chrome.Contains(emitted),
+                    $"Container ':::{name}' emitted the application's own class '{emitted}'.");
+
+    Ensure(Body(":::warning\nx\n:::").Contains("class=\"md-container md-container-warning\"", StringComparison.Ordinal),
+        "Custom containers are not namespaced under md-container.");
+    Ensure(Body(":::" + new string('z', 200) + "\nx\n:::").Contains(new string('z', 32), StringComparison.Ordinal) &&
+        !Body(":::" + new string('z', 200) + "\nx\n:::").Contains(new string('z', 33), StringComparison.Ordinal),
+        "Container slug length is not capped.");
+
+    // style was an S6-XSS vector (animation + onanimationstart) and must stay unreachable,
+    // including via a grid table's <col style="width:50%">.
+    Ensure(!Regex.IsMatch(Body("+---+---+\n| a | b |\n+===+===+\n| 1 | 2 |\n+---+---+"),
+        @"\sstyle\s*=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+        "A style attribute survived sanitizing.");
+}
 
 static void ValidateFrontMatter()
 {
