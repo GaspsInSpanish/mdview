@@ -17,6 +17,7 @@ internal static class MarkdownRenderer
     {
         var builder = new MarkdownPipelineBuilder()
             .UseAlertBlocks()
+            .UseYamlFrontMatter()
             .UseAutoLinks()
             .UseDefinitionLists()
             .UseEmphasisExtras()

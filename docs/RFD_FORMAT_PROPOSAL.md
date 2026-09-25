@@ -11,12 +11,15 @@
 >    with a per-response script nonce and no `'unsafe-inline'`. Verified against 11
 >    adversarial vectors; `img-src` permits `https:` by owner decision so README badges
 >    still render. Read §0 as the incident report, not an open vulnerability.
-> 2. **A separate, still-open bug surfaced during the same work.** A `.md` beginning
->    with YAML frontmatter (`---\ntitle: ...\n---`) renders as a horizontal rule plus a
->    heading of raw YAML, because Markdig's `Yaml` extension was never enabled. It is
->    cosmetic, not a security issue, and one line to fix — but the *right* fix is a
->    design question this proposal should answer (hide it as GitHub does, or render it
->    as a styled metadata header). See §4.
+> 2. ~~**A separate, still-open bug surfaced during the same work.**~~ **Fixed and
+>    shipped in v1.2.4.** A `.md` beginning with YAML frontmatter rendered as a
+>    horizontal rule plus a heading of raw YAML, because Markdig's `Yaml` extension was
+>    never enabled. The owner ruled for hiding it, as GitHub does; `UseYamlFrontMatter()`
+>    emits no HTML, so it cost one line and no security review. The note above called it
+>    "cosmetic" — by v1.2.2 it was not: the bogus heading had content after it, so
+>    `fold.js` treated it as a foldable section and the whole document became collapsible
+>    under a heading of raw YAML. **A cosmetic defect became a functional one because a
+>    later feature changed what a stray heading means.**
 >
 > Everything else is the agent's own work, unedited. Its empirical claims were made by
 > running the shipped renderer, not read from documentation, and the ones I re-verified
@@ -156,32 +159,37 @@ Misclassifying view state as document state produces unreadable git history and 
 
 All rows below are **empirically verified** against the shipped v1.1.0 pipeline by rendering probe input through `tools/RenderProbe`. This table is the answer to "which candidates need no invention."
 
-> **Re-measured 2026-09-22 against v1.2.2.** These rows were measured *before* the S6-XSS fix removed `UseAdvancedExtensions()`. That removal silently took several extensions with it, so a row reading "parses today" may mean "parsed in v1.1.0". The callout row was wrong on exactly this point and has been corrected below; **the remaining rows have not been re-measured** and should be re-run through `RenderProbe` before any of them is planned against.
+> **Fully re-measured 2026-09-24 against v1.2.3.** Every row below was re-rendered through the shipped pipeline. **Six rows marked "✅ Parses" were false** — the extensions behind them came in through `UseAdvancedExtensions()` and left with it in the S6-XSS fix. The original table was accurate when written against v1.1.0 and became wrong the moment the bundle was banned; it was the *summary* ("13 of 20 already parse") that kept being quoted afterwards, and that number is now **7**. Rows below carry their measured output, not their remembered output.
 
 | Candidate feature | Status today | Actual output | What's actually missing |
 |---|---|---|---|
 | **Callouts / admonitions** | ✅ **Shipped v1.2.3** | `> [!NOTE]` → `<div class="markdown-alert markdown-alert-note"><p class="markdown-alert-title">Note</p>…` | **Done.** ~~CSS only~~ — this row was measured against v1.1.0 and was stale from the S6-XSS fix onward: alerts arrived via `UseAdvancedExtensions()` and vanished with it, so `> [!NOTE]` rendered as a literal blockquote in v1.1.1–v1.2.2. Now `UseAlertBlocks()` is enabled explicitly with a replacement renderer (see P2) |
 | **Footnotes** | ✅ Parses | `[^1]` → `<a class="footnote-ref">` + `<div class="footnotes">` with back-refs | CSS only |
-| **Figures + captions** | ✅ Parses | `^^^ … ^^^ caption` → `<figure><figcaption>` | CSS — but the **syntax is grade C** and should be replaced (§4, P-3) |
-| **Custom containers** | ✅ Parses | `:::warning` → `<div class="warning">` | CSS — but **grade C**; use only where alerts can't reach |
-| **Math** | ✅ Parses | `$a^2$` → `<span class="math">\(a^2\)</span>`; `$$…$$` → `<div class="math">\[…\]</div>` | A **typesetting engine** (KaTeX). Without it the reader sees raw TeX |
-| **Mermaid diagrams** | ✅ Parses | ` ```mermaid ` → `<pre class="mermaid">` | **mermaid.js** (~3 MB) vendored + `securityLevel:'strict'` |
+| **Figures + captions** | ❌ **Regressed** | `^^^ … ^^^ caption` → `<p>^^^ <img …/> ^^^ A caption</p>` — the markers render as literal text | `UseFigures()` must be re-enabled explicitly. Was never "CSS only". Syntax is still **grade C** and should be replaced regardless (§4, P-3) |
+| **Custom containers** | ❌ **Regressed** | `:::warning\nInside.\n:::` → `<p>:::warning Inside. :::</p>` | `UseCustomContainers()` must be re-enabled explicitly. Note it interpolates the container name into a class — the same hazard `SafeAlertRenderer` exists to prevent, and it would need the same treatment. Still **grade C** |
+| **Math** | ❌ **Regressed** | `$a^2$` → `<p>Value $a^2$ here.</p>`; `$$…$$` → `<p>$$ a^2 $$</p>` | `UseMathematics()` **and** then a typesetting engine (KaTeX). Two steps, not one |
+| **Mermaid diagrams** | ⚠️ **Output changed** | ` ```mermaid ` → `<pre><code class="language-mermaid">` — an ordinary fence, not `UseDiagrams()`'s `<pre class="mermaid">` | **mermaid.js** (~3 MB) vendored + `securityLevel:'strict'`. Either re-enable `UseDiagrams()` or point mermaid at `code.language-mermaid`; the second needs no extension |
 | **Definition lists** | ✅ Parses | `Term` / `:   Def` → `<dl><dt><dd>` | CSS only |
-| **Abbreviations** | ✅ Parses | `*[HTML]: …` → `<abbr title="…">` | CSS only (dotted underline) |
-| **Grid tables** | ✅ Parses | `+---+---+` → `<table>` with `<col style="width:50%">` | Nothing; works |
+| **Abbreviations** | ❌ **Regressed** | `*[HTML]: …` → `<p>*[HTML]: HyperText Markup Language</p>`, definition line visible | `UseAbbreviations()` must be re-enabled explicitly, *then* CSS |
+| **Grid tables** | ❌ **Regressed, and it emits garbage** | The grid renders as a literal paragraph, and `+=======+` is then eaten by `UseEmphasisExtras()` as `==…==`, producing **spurious `<mark>` elements** around the wreckage | `UseGridTables()`. This is the only regressed row that produces actively wrong output rather than inert text, so it is the one worth fixing first |
 | **Emphasis extras** | ✅ Parses | `==m==`→`<mark>`, `++i++`→`<ins>`, `^s^`→`<sup>`, `~s~`→`<sub>` | CSS for `<mark>`. Note `~x~` = subscript here, **not** GFM strikethrough — `~~x~~`→`<del>` still works |
-| **List extras** | ✅ Parses | `a.` / `b.` → `<ol type="a">` | Nothing |
+| **List extras** | ❌ **Regressed** | `a.` / `b.` → `<p>a. first b. second</p>` | `UseListExtras()` must be re-enabled explicitly |
 | **Heading anchors / TOC source** | ✅ Parses | `UseAutoIdentifiers(GitHub)` — every heading has a GitHub-compatible `id` | A renderer-side TOC. **No syntax needed** |
 | **Task metadata (`@due`, `#tag`)** | ✅ **It's just text** | Plain text inside the list item | Renderer-side pattern styling. **No syntax to invent** |
-| **YAML frontmatter** | ❌ **BROKEN TODAY** | `---\ntitle: x\n---` → `<hr />` + `<h2 id="title-x">title: x</h2>` | `UseYamlFrontMatter()` is **not** in `UseAdvancedExtensions`, despite the bundle's docstring claiming "all extensions except BootStrap, Emoji, SmartyPants, softline". **This is a live defect** affecting every Obsidian/Jekyll/Hugo note |
-| **Generic attributes** | ⚠️ **SECURITY HOLE** | `{onclick="…"}` → emitted verbatim | See §0. Must be removed or clamped |
-| **Collapsible sections** | ❌ Absent | GFM's `<details>` is raw HTML, correctly blocked by `DisableHtml()` | Needs a design (§4, P-4) — but the right design has **no syntax** |
+| **YAML frontmatter** | ✅ **Fixed, shipped v1.2.4** | `---\ntitle: x\ntags: [a]\n---` → nothing; the body starts at the first real block | **Done.** `UseYamlFrontMatter()` emits no HTML at all, so hiding it added no attack surface and needed no sanitizer work. The block still reaches the AST as `YamlFrontMatterBlock`, so rendering it as a styled metadata header later is not foreclosed — that option was declined for now because YAML *values* are untrusted text and parsing them properly would mean a second NuGet dependency |
+| **Generic attributes** | ✅ **Fixed, shipped v1.1.1** | `# H {#custom .fancy onclick="alert(1)"}` → `<h1 id="h-custom-fancy-onclickalert1">H {#custom .fancy onclick=&quot;alert(1)&quot;}</h1>` — the attribute block is inert text | Nothing. Re-verified 2026-09-24: no attribute is emitted. Do not re-enable `UseGenericAttributes()` (§0) |
+| **Collapsible sections** | ✅ **Shipped v1.2.2** | Click a heading with content to fold its run of siblings; `View → Collapse All / Expand All` | **Done**, and with no syntax, as predicted. Session-only state per the owner's ruling on §8 Q4 |
 | **Transclusion / includes** | ❌ Absent | — | Needs a parser **and** a new file-read primitive. §4, T-3 |
 | **Stateful widgets beyond checkbox** | ❌ Absent | — | Needs syntax **and** a generalized write path. §4, S-2 |
 | **Tabs / columns** | ❌ Absent | — | Rejected (§4) |
 | **Backlinks** | ❌ Absent | — | Needs a directory index. Rejected (§4, T-4) |
 
-**Summary: 13 of the 20 candidate features already parse.** The dominant missing artefact in the entire presentational and content roadmap is approximately forty lines of CSS in `Theme.css`. Two entries are defects in shipped code, one of them critical.
+**Summary, re-measured 2026-09-24: 7 of the 20 candidate features work today** — callouts, footnotes, definition lists, emphasis extras, heading anchors, task metadata and collapsible sections. **Six more regressed** when the extension bundle was banned and need one explicit `Use…()` call each before any CSS is worth writing: figures, custom containers, math, abbreviations, grid tables, list extras. The original claim that "the dominant missing artefact is approximately forty lines of CSS" **is no longer true** and was the single most misleading line in this document, because it survived the change that invalidated it.
+
+Two lessons, both paid for:
+
+1. **Every explicit extension list is a standing inventory that drifts.** Banning `UseAdvancedExtensions()` was correct and is not in question — but it converted "what the parser supports" from a property of Markdig into a property of *our* code, and nothing re-checked the difference for three releases.
+2. **A capability table needs the version it was measured against in every row, not in a preamble.** This one said "empirically verified", which was true, and stayed on the page long after it stopped being true.
 
 ---
 

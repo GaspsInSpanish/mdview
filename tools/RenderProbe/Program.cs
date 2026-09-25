@@ -15,12 +15,14 @@ ValidateMenuShell(document);
 ValidateEditFeatures(document);
 ValidateThemeRendering(markdown, title);
 ValidateAlerts();
+ValidateFrontMatter();
 await File.WriteAllTextAsync(args[1], document);
 Console.WriteLine("render-menu=passed");
 Console.WriteLine("render-csp-nonces=passed");
 Console.WriteLine("render-menu-css=passed");
 Console.WriteLine("render-edit=passed");
 Console.WriteLine("render-alerts=passed");
+Console.WriteLine("render-frontmatter=passed");
 return 0;
 
 static void ValidateMenuShell(string html)
@@ -287,6 +289,32 @@ static double RelativeLuminance(string color)
 
 static double ContrastRatio(double first, double second) =>
     (Math.Max(first, second) + 0.05) / (Math.Min(first, second) + 0.05);
+
+static void ValidateFrontMatter()
+{
+    const string source = "---\ntitle: My Doc\ntags: [a, b]\n---\n\n# Heading\n\n- [ ] first task\n- [x] second task\n\nText.\n\n- [ ] third task\n";
+    var html = Renderer.RenderDocument(source, "frontmatter");
+    var body = html[html.IndexOf("<main", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)];
+
+    Ensure(!body.Contains("title: My Doc", StringComparison.Ordinal) &&
+        !body.Contains("tags:", StringComparison.Ordinal),
+        "YAML frontmatter leaked into the rendered body.");
+    Ensure(!Regex.IsMatch(body, @"<h[1-6][^>]*>[^<]*title:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+        "YAML frontmatter still renders as a heading, which fold.js would treat as a foldable section.");
+
+    // data-line is the 1-based line in the user's file that a checkbox toggle patches.
+    // Hiding a leading block must not shift it, or toggles write to the wrong line.
+    var lines = Regex.Matches(body, @"<input type=""checkbox"" data-line=""(?<n>\d+)""",
+        RegexOptions.CultureInvariant).Select(match => int.Parse(match.Groups["n"].Value)).ToArray();
+    int[] expectedLines = [8, 9, 13];
+    Ensure(lines.SequenceEqual(expectedLines),
+        $"Task line numbers under frontmatter were [{string.Join(", ", lines)}], " +
+        $"expected [{string.Join(", ", expectedLines)}].");
+    var sourceLines = source.Split('\n');
+    foreach (var line in lines)
+        Ensure(sourceLines[line - 1].Contains("- [", StringComparison.Ordinal),
+            $"data-line={line} does not point at a task in the source; a toggle would patch the wrong line.");
+}
 
 static void ValidateAlerts()
 {

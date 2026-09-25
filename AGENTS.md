@@ -87,6 +87,12 @@ It is a *reading* tool. It does not edit, and it has no UI chrome of its own.
   - The served page carries a **CSP with a per-response script nonce and no
     `'unsafe-inline'`**, which structurally kills inline handlers. Never weaken
     `script-src` or `connect-src` to make something work — report it instead.
+  - **When mutation-testing, restore the source with `cp`, never `mv`.** `mv` preserves
+    the backup's original mtime, so MSBuild sees the restored source as older than the
+    compiled output, skips the rebuild, and runs the **mutated binary against restored
+    source**. That silently invalidates the result in either direction — a false failure
+    after the restore, or worse, a mutation that appears not to be caught because the
+    good binary is still on disk. `cp` stamps mtime to now; `touch` the file if in doubt.
   - When scanning rendered HTML in a test, parse it structurally. The page embeds
     highlight.js, whose source contains literal `<script`/`<style>` patterns; naive
     regex scans have produced false results twice.
