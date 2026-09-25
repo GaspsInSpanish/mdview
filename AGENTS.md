@@ -71,6 +71,19 @@ It is a *reading* tool. It does not edit, and it has no UI chrome of its own.
     adding one, ask what HTML and which attributes it lets *document content* emit.
   - The post-render sanitizer allowlists both **URI schemes** and **attributes**, and
     strips every `on*` unconditionally. Treat it as load-bearing, not belt-and-braces.
+    Note what it does *not* do: it filters attribute **names**, never **values**. An
+    allowlisted attribute such as `class` passes through whatever the renderer put in
+    it, so an extension that interpolates document text into a class is unreviewed
+    output, not sanitized output.
+  - **Document text must never reach an attribute value.** Where an extension does
+    that, replace its renderer rather than widening the sanitizer. `UseAlertBlocks()`
+    interpolates the alert kind into a class name (`> [!ANYTHING]` →
+    `markdown-alert-anything`), so `SafeAlertRenderer` picks the class from a fixed
+    table and renders unrecognised kinds as plain quotes.
+  - Prefer a **CSS pseudo-element to decorative markup**. Both the fold chevron and
+    the alert icons are `::before` content. Markdig's stock alert icons are inline
+    SVG whose `viewBox`/`width`/`height`/`d` the sanitizer strips, and the fix is
+    never to allowlist those attributes for the sake of a glyph.
   - The served page carries a **CSP with a per-response script nonce and no
     `'unsafe-inline'`**, which structurally kills inline handlers. Never weaken
     `script-src` or `connect-src` to make something work — report it instead.

@@ -11,6 +11,11 @@
   --bevel-hi-inner: #E7E3D9;
   --bevel-lo-inner: #A8A499;
   --bevel-lo-outer: #88847A;
+  --alert-note: #396BAF;
+  --alert-tip: #2C784C;
+  --alert-important: #7B4FCF;
+  --alert-warning: #916100;
+  --alert-caution: #BC3B34;
   --dark-bg: #262624;
   --dark-surface: #30302E;
   --dark-text: #E8E6E3;
@@ -23,6 +28,11 @@
   --dark-bevel-hi-inner: #505049;
   --dark-bevel-lo-inner: #222220;
   --dark-bevel-lo-outer: #0C0C0B;
+  --dark-alert-note: #7FAEE8;
+  --dark-alert-tip: #63C38A;
+  --dark-alert-important: #B795F0;
+  --dark-alert-warning: #D9A441;
+  --dark-alert-caution: #E88B85;
   color-scheme: light dark;
 }
 
@@ -40,6 +50,11 @@
     --bevel-hi-inner: var(--dark-bevel-hi-inner);
     --bevel-lo-inner: var(--dark-bevel-lo-inner);
     --bevel-lo-outer: var(--dark-bevel-lo-outer);
+    --alert-note: var(--dark-alert-note);
+    --alert-tip: var(--dark-alert-tip);
+    --alert-important: var(--dark-alert-important);
+    --alert-warning: var(--dark-alert-warning);
+    --alert-caution: var(--dark-alert-caution);
     color-scheme: dark;
   }
 }
@@ -59,6 +74,11 @@
   --bevel-hi-inner: var(--dark-bevel-hi-inner);
   --bevel-lo-inner: var(--dark-bevel-lo-inner);
   --bevel-lo-outer: var(--dark-bevel-lo-outer);
+  --alert-note: var(--dark-alert-note);
+  --alert-tip: var(--dark-alert-tip);
+  --alert-important: var(--dark-alert-important);
+  --alert-warning: var(--dark-alert-warning);
+  --alert-caution: var(--dark-alert-caution);
   color-scheme: dark;
 }
 
@@ -378,6 +398,40 @@ blockquote {
 }
 
 blockquote > :last-child { margin-bottom: 0; }
+
+/* GitHub-style alerts. The kind-specific class is chosen by the renderer from a
+   fixed table, never from the document, and the icon is a CSS pseudo-element so
+   no SVG attributes need adding to the sanitizer allowlist. VS15 (\FE0E) forces
+   text presentation for the glyphs that Windows would otherwise draw as emoji. */
+.markdown-alert {
+  --alert-accent: var(--accent);
+  --alert-icon: "";
+  margin: 1.5em 0;
+  padding: 0.85rem 1rem;
+  border-left: 3px solid var(--alert-accent);
+  border-radius: 0 3px 3px 0;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.markdown-alert > :last-child { margin-bottom: 0; }
+
+.markdown-alert-title {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  margin: 0 0 0.5em;
+  color: var(--alert-accent);
+  font-weight: 600;
+}
+
+.markdown-alert-title::before { content: var(--alert-icon); }
+
+.markdown-alert-note { --alert-accent: var(--alert-note); --alert-icon: "\24D8"; }
+.markdown-alert-tip { --alert-accent: var(--alert-tip); --alert-icon: "\2605"; }
+.markdown-alert-important { --alert-accent: var(--alert-important); --alert-icon: "\25C6"; }
+.markdown-alert-warning { --alert-accent: var(--alert-warning); --alert-icon: "\26A0\FE0E"; }
+.markdown-alert-caution { --alert-accent: var(--alert-caution); --alert-icon: "\2716"; }
 
 table {
   width: 100%;

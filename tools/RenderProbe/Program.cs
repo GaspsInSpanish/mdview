@@ -14,11 +14,13 @@ var document = Renderer.RenderDocument(markdown, title);
 ValidateMenuShell(document);
 ValidateEditFeatures(document);
 ValidateThemeRendering(markdown, title);
+ValidateAlerts();
 await File.WriteAllTextAsync(args[1], document);
 Console.WriteLine("render-menu=passed");
 Console.WriteLine("render-csp-nonces=passed");
 Console.WriteLine("render-menu-css=passed");
 Console.WriteLine("render-edit=passed");
+Console.WriteLine("render-alerts=passed");
 return 0;
 
 static void ValidateMenuShell(string html)
@@ -285,6 +287,106 @@ static double RelativeLuminance(string color)
 
 static double ContrastRatio(double first, double second) =>
     (Math.Max(first, second) + 0.05) / (Math.Min(first, second) + 0.05);
+
+static void ValidateAlerts()
+{
+    // Rendered from a fixture rather than the caller's file so this assertion cannot
+    // go vacuous on a document that happens to contain no alerts.
+    const string source = """
+> [!NOTE]
+> Note body.
+
+> [!TIP]
+> Tip body.
+
+> [!IMPORTANT]
+> Important body.
+
+> [!WARNING]
+> Warning body.
+
+> [!CAUTION]
+> Caution body.
+
+> [!UNKNOWNKIND]
+> Unknown kinds must not reach a class name.
+
+> [!EVIL"onload=alert(1) x="]
+> Hostile kind.
+
+> [!NOTE]
+> Nested <script>alert(1)</script> and [link](javascript:alert(1)).
+
+> Plain quote.
+""";
+    var html = Renderer.RenderDocument(source, "alerts");
+    var body = html[html.IndexOf("<main", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)];
+
+    string[] kinds = ["note", "tip", "important", "warning", "caution"];
+    foreach (var kind in kinds)
+    {
+        Ensure(body.Contains($"""<div class="markdown-alert markdown-alert-{kind}">""", StringComparison.Ordinal),
+            $"Alert kind '{kind}' did not render its container.");
+        var title = char.ToUpperInvariant(kind[0]) + kind[1..];
+        Ensure(body.Contains($"""<p class="markdown-alert-title">{title}</p>""", StringComparison.Ordinal),
+            $"Alert kind '{kind}' did not render its '{title}' title.");
+    }
+
+    // The renderer picks the class from a fixed table, so a document-supplied kind
+    // must never appear in one. Without this, `> [!ANYTHING]` silently becomes
+    // `markdown-alert-anything` and the document controls an attribute value.
+    foreach (Match match in Regex.Matches(body, @"markdown-alert-(?<kind>[A-Za-z0-9-]+)", RegexOptions.CultureInvariant))
+    {
+        var rendered = match.Groups["kind"].Value;
+        Ensure(rendered == "title" || kinds.Contains(rendered),
+            $"Alert class 'markdown-alert-{rendered}' came from the document, not the renderer's table.");
+    }
+    Ensure(body.Contains("<blockquote>", StringComparison.Ordinal),
+        "An unrecognised alert kind did not fall back to a quote.");
+    // The parser consumes the [!KIND] marker. If the fallback does not write it back, a
+    // typo'd kind silently deletes that line of the user's document from the display.
+    Ensure(body.Contains("[!UNKNOWNKIND]", StringComparison.Ordinal),
+        "An unrecognised alert kind swallowed its marker text instead of showing it.");
+
+    // The stock Markdig renderer emits an inline SVG icon whose viewBox/width/height/d
+    // attributes the sanitizer strips, leaving an empty box. Ours uses CSS instead.
+    Ensure(!body.Contains("<svg", StringComparison.OrdinalIgnoreCase),
+        "Alerts emitted inline SVG, whose geometry attributes the sanitizer strips.");
+    Ensure(!Regex.IsMatch(body, @"\son[a-z]+\s*=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+        "A hostile alert kind produced an event-handler attribute.");
+    Ensure(!body.Contains("javascript:", StringComparison.OrdinalIgnoreCase),
+        "A javascript: URI survived inside an alert body.");
+    Ensure(!Regex.IsMatch(body, @"<script", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+        "Alert body content was not escaped.");
+
+    var css = Assets.LoadTheme();
+    foreach (var kind in kinds)
+        Ensure(Regex.IsMatch(css, $@"\.markdown-alert-{kind}\s*\{{[^}}]*--alert-accent", RegexOptions.CultureInvariant),
+            $"Alert kind '{kind}' had no accent rule.");
+
+    // Alert titles are coloured text on --surface at font-weight 600 and 16.5px, which is
+    // below the WCAG large-text threshold, so they owe the full 4.5:1 rather than 3:1.
+    var tokens = Regex.Match(css, @"^\s*:root\s*\{(?<tokens>[^}]*)\}", RegexOptions.CultureInvariant)
+        .Groups["tokens"].Value;
+    var worst = double.MaxValue;
+    foreach (var kind in kinds)
+        foreach (var dark in new[] { false, true })
+        {
+            var surface = RelativeLuminance(ReadHexToken(tokens, dark ? "--dark-surface" : "--surface"));
+            var accent = RelativeLuminance(ReadHexToken(tokens, dark ? $"--dark-alert-{kind}" : $"--alert-{kind}"));
+            var contrast = ContrastRatio(accent, surface);
+            Ensure(contrast >= 4.5,
+                $"Alert '{kind}' title contrast in the {(dark ? "dark" : "light")} theme is only {contrast:F2}:1, under WCAG AA 4.5:1.");
+            worst = Math.Min(worst, contrast);
+        }
+    Console.WriteLine($"alert-contrast-worst={worst:F2}");
+    Ensure(Regex.IsMatch(css, @"\.markdown-alert-title::before\s*\{[^}]*content:", RegexOptions.CultureInvariant),
+        "Alert icons are not supplied by CSS.");
+    foreach (var scope in new[] { "--alert-note", "--dark-alert-note" })
+        Ensure(css.Contains(scope, StringComparison.Ordinal), $"Alert token '{scope}' was missing.");
+    Ensure(Regex.Matches(css, @"--alert-note:", RegexOptions.CultureInvariant).Count == 3,
+        "Alert colours were not remapped in both dark scopes.");
+}
 
 static bool HasAttribute(string tag, string name, string? value = null) =>
     value is null ? GetAttribute(tag, name) is not null :

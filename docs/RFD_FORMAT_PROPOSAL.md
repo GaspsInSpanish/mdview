@@ -156,9 +156,11 @@ Misclassifying view state as document state produces unreadable git history and 
 
 All rows below are **empirically verified** against the shipped v1.1.0 pipeline by rendering probe input through `tools/RenderProbe`. This table is the answer to "which candidates need no invention."
 
+> **Re-measured 2026-09-22 against v1.2.2.** These rows were measured *before* the S6-XSS fix removed `UseAdvancedExtensions()`. That removal silently took several extensions with it, so a row reading "parses today" may mean "parsed in v1.1.0". The callout row was wrong on exactly this point and has been corrected below; **the remaining rows have not been re-measured** and should be re-run through `RenderProbe` before any of them is planned against.
+
 | Candidate feature | Status today | Actual output | What's actually missing |
 |---|---|---|---|
-| **Callouts / admonitions** | ✅ **Parses** | `> [!NOTE]` → `<div class="markdown-alert markdown-alert-note"><p class="markdown-alert-title">[svg]Note</p>…` | **CSS only.** All five GFM kinds (`NOTE TIP IMPORTANT WARNING CAUTION`) work; lowercase works; GitHub-style inline SVG icons are already emitted |
+| **Callouts / admonitions** | ✅ **Shipped v1.2.3** | `> [!NOTE]` → `<div class="markdown-alert markdown-alert-note"><p class="markdown-alert-title">Note</p>…` | **Done.** ~~CSS only~~ — this row was measured against v1.1.0 and was stale from the S6-XSS fix onward: alerts arrived via `UseAdvancedExtensions()` and vanished with it, so `> [!NOTE]` rendered as a literal blockquote in v1.1.1–v1.2.2. Now `UseAlertBlocks()` is enabled explicitly with a replacement renderer (see P2) |
 | **Footnotes** | ✅ Parses | `[^1]` → `<a class="footnote-ref">` + `<div class="footnotes">` with back-refs | CSS only |
 | **Figures + captions** | ✅ Parses | `^^^ … ^^^ caption` → `<figure><figcaption>` | CSS — but the **syntax is grade C** and should be replaced (§4, P-3) |
 | **Custom containers** | ✅ Parses | `:::warning` → `<div class="warning">` | CSS — but **grade C**; use only where alerts can't reach |
@@ -215,7 +217,9 @@ Syntax: standard `---` fenced YAML at position 0. Degradation: **A** — univers
 
 ---
 
-**P2 · Callouts via GFM alerts** — *Risk: Low* · *Effort: S, 1 packet* · *Markdig: **native, already enabled***
+**P2 · Callouts via GFM alerts** — ✅ **Delivered in v1.2.3** · *Risk: Low* · *Effort: S, 1 packet* · *Markdig: ~~native, already enabled~~ **native, but was disabled***
+
+> **Correction (2026-09-22).** "Already enabled" was true when this was written and false by the time it was planned. Alerts came in through `UseAdvancedExtensions()`; the S6-XSS P0 fix banned that bundle and enumerated extensions explicitly, and `UseAlertBlocks()` was not on the list. From v1.1.1 to v1.2.2 `> [!NOTE]` rendered as a literal blockquote reading `[!NOTE]`. **This was never a CSS-only item** — it needed the extension enabled explicitly, which is precisely the cost §0 warned that banning the bundle would impose.
 
 The single best value-for-effort item in this document. Style the five `.markdown-alert-*` classes in `Theme.css` against the existing palette tokens — tinted left rule, icon colour, `--surface` background, title weight.
 
@@ -227,6 +231,13 @@ The single best value-for-effort item in this document. Style the five `.markdow
 Degradation: **A.** GitHub, VS Code, and Obsidian all render these natively. Anywhere else: a blockquote whose first line reads `[!WARNING]` — legible and self-explanatory.
 Known behaviour to spec: unknown kinds (`[!BOGUS]`) emit `markdown-alert-bogus` with **no title paragraph**, silently swallowing the marker text. Style only the five known kinds and add a fallback rule for `.markdown-alert` so an unknown kind still reads as a callout. (Class-name injection via the kind *is* escaped — verified `[!X" onclick="…]` falls back to a plain blockquote with entities.)
 Nested alerts are off (`AllowNestedAlerts=false`) — verified; an alert inside a list item degrades to a plain blockquote. Document that limitation; do not enable nesting without re-reviewing it under P0.
+
+**As built (2026-09-22), differing from the spec above in two places.** Markdig's stock `AlertBlockRenderer` is replaced by `SafeAlertRenderer`, for two measured reasons:
+
+1. **The kind reaches a class name.** Re-measured: the parser accepts `[A-Za-z]+` only, so every injection attempt (`[!X"onload=…]`, `[!<script>]`, spaces, unicode, hyphens) does fall back to an escaped blockquote as this section claims — that part held up. But *any* alphabetic kind is accepted, so `[!BOGUS]` yields `markdown-alert-bogus` and a 200-character kind yields a 200-character class. The `markdown-alert-` prefix makes collision with our own classes impossible, so this is not exploitable — it is simply document text in an attribute for no reason. The renderer now takes both the slug and the title from a fixed five-entry table, so **no document text reaches a class attribute at all**, and an unrecognised kind renders as a plain `<blockquote>`, rather than the "fallback callout" specced above, which would have dignified a typo'd marker as a real callout. **The marker text is written back into that quote.** The parser consumes `[!KIND]` before the renderer sees it, so the naive fallback silently deletes that line of the document from the display over a typo — the same "silently swallowing the marker text" behaviour this section noted in stock Markdig, reintroduced by the fix for it. GitHub keeps the literal text visible; so do we now, as its own paragraph rather than GitHub's soft-break merge.
+2. **The stock SVG icons would have arrived empty.** The stock renderer emits `<svg viewBox … width … height …><path d="…">`. None of `viewBox`, `width`, `height`, `d` or `aria-hidden` is on the sanitizer's attribute allowlist, so the icon would be stripped to a bare `<svg><path></path></svg>`. Rather than widen the allowlist for five decorative glyphs, the icon is a CSS `::before` on `.markdown-alert-title` — the same approach as the fold chevron, and it keeps the sanitizer surface unchanged.
+
+`RenderProbe` asserts the five containers and titles, that every `markdown-alert-*` class in the output is one of the five, that no `<svg>` is emitted, and that the colour tokens are remapped in **both** dark scopes. Mutation-tested: dropping `UseAlertBlocks()` → `Alert kind 'note' did not render its container`; bypassing the kind table → `Alert class 'markdown-alert-unknownkind' came from the document, not the renderer's table`; restoring the stock renderer → `Alert kind 'note' did not render its 'Note' title`.
 **Verifiable in WSL:** entirely — CSS presence plus rendered-class assertions. Visual confirmation needs a browser → PM-run, or inspect the generated HTML file in a WSL browser if one is available.
 
 ---
@@ -438,7 +449,7 @@ The middle column is the failure mode to name explicitly: **if a document can pe
 |---|---|---|---|---|
 | P0 | Enumerate extensions; kill attribute injection; add CSP; adversarial corpus | **High** | M | Yes, except CSP enforcement |
 | P1 | `UseYamlFrontMatter` — frontmatter stops rendering as garbage | Low | S | Yes |
-| P2 | Callout CSS for the five GFM alert kinds + auto-`<figure>` (T-7) | Low | S | Yes (visual → PM) |
+| P2 | ✅ **Done (v1.2.3)** — `UseAlertBlocks()` + constrained renderer + callout CSS for the five GFM alert kinds. Auto-`<figure>` (T-7) still outstanding | Low | S | Yes (visual → PM) |
 | P3 | Task metadata styling (`@due`, `#tag`, `!pri`) | Low | S | Yes |
 | P5 | Auto-TOC in the gutter from existing heading ids | Low | S–M | Yes (layout → PM) |
 | P4 | Collapsible `##` sections with machine-local view state | Medium | M | Partly; `%LOCALAPPDATA%` round-trip → Windows |
