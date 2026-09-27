@@ -1,19 +1,22 @@
 (() => {
   const reader = document.querySelector('#reader-content');
-  const headings = [...reader.children].filter(element => /^H[1-6]$/.test(element.tagName));
+  const isHeading = element => /^H[1-6]$/.test(element.tagName);
+  // Source-only placeholders (edit mode's frontmatter and definitions) have nothing to fold.
+  const isContent = element => !element.classList.contains('md-source-only');
   const collapsed = new Set();
+  let foldable = [];
 
   const level = heading => Number(heading.tagName.slice(1));
   const isFoldable = heading => {
-    const next = heading.nextElementSibling;
-    return Boolean(next && (!/^H[1-6]$/.test(next.tagName) || level(next) > level(heading)));
+    let next = heading.nextElementSibling;
+    while (next && !isContent(next)) next = next.nextElementSibling;
+    return Boolean(next && (!isHeading(next) || level(next) > level(heading)));
   };
-  const foldable = headings.filter(isFoldable);
 
   function apply() {
     const stack = [];
     [...reader.children].forEach(element => {
-      const heading = /^H[1-6]$/.test(element.tagName);
+      const heading = isHeading(element);
       if (heading) {
         const headingLevel = level(element);
         while (stack.length && stack.at(-1).level >= headingLevel) stack.pop();
@@ -32,18 +35,35 @@
     apply();
   }
 
-  foldable.forEach(heading => {
-    heading.tabIndex = 0;
-    // Keep native heading semantics for document navigation; role="button" would replace them.
-    heading.setAttribute('aria-expanded', 'true');
-    heading.addEventListener('click', () => {
-      if (getSelection()?.isCollapsed) toggle(heading);
+  // Edit mode replaces the reader's content, so headings are found afresh rather than held.
+  function refresh() {
+    collapsed.clear();
+    foldable = [...reader.children].filter(isHeading).filter(isFoldable);
+    foldable.forEach(heading => {
+      heading.tabIndex = 0;
+      // Keep native heading semantics for document navigation; role="button" would replace them.
+      heading.setAttribute('aria-expanded', 'true');
     });
-    heading.addEventListener('keydown', event => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      toggle(heading);
-    });
+    apply();
+  }
+
+  const foldableHeading = target => {
+    const heading = target.closest?.('h1, h2, h3, h4, h5, h6');
+    return heading && heading.parentElement === reader && foldable.includes(heading) ? heading : null;
+  };
+
+  reader.addEventListener('click', event => {
+    // In edit mode a click on a heading opens it for editing instead.
+    if (document.documentElement.hasAttribute('data-editing')) return;
+    const heading = foldableHeading(event.target);
+    if (heading && getSelection()?.isCollapsed) toggle(heading);
+  });
+  reader.addEventListener('keydown', event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const heading = foldableHeading(event.target);
+    if (!heading) return;
+    event.preventDefault();
+    toggle(heading);
   });
 
   function reveal(node) {
@@ -54,7 +74,7 @@
     const stack = [];
     for (const element of reader.children) {
       if (element === child) break;
-      if (!/^H[1-6]$/.test(element.tagName)) continue;
+      if (!isHeading(element)) continue;
       const headingLevel = level(element);
       while (stack.length && level(stack.at(-1)) >= headingLevel) stack.pop();
       stack.push(element);
@@ -73,6 +93,6 @@
     apply();
   }
 
-  window.mdviewFold = { reveal, collapseAll, expandAll };
-  apply();
+  window.mdviewFold = { reveal, collapseAll, expandAll, refresh };
+  refresh();
 })();

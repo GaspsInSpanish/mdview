@@ -14,6 +14,7 @@ public sealed class ReaderServer : IDisposable
 {
     private const int FirstPort = 7717;
     private const int LastPort = 7817;
+    private const long MaximumEditBytes = 64L * 1024 * 1024;
 
     private readonly DocumentRegistry registry;
     private readonly ThemeConfigStore themeConfig;
@@ -168,6 +169,24 @@ public sealed class ReaderServer : IDisposable
                 return;
             }
 
+            if (context.Request.HttpMethod == "POST" && TryGetDocumentRoute(segments, "source", out document))
+            {
+                await BeginEditAsync(context, document).ConfigureAwait(false);
+                return;
+            }
+
+            if (context.Request.HttpMethod == "POST" && TryGetDocumentRoute(segments, "render", out document))
+            {
+                await RenderEditAsync(context, document).ConfigureAwait(false);
+                return;
+            }
+
+            if (context.Request.HttpMethod == "POST" && TryGetDocumentRoute(segments, "save", out document))
+            {
+                await SaveEditAsync(context, document).ConfigureAwait(false);
+                return;
+            }
+
             await WriteNotFoundAsync(context.Response).ConfigureAwait(false);
             context.Response.Close();
         }
@@ -210,23 +229,24 @@ public sealed class ReaderServer : IDisposable
     {
         try
         {
-            var source = await ReadDocumentAsync(document.Path).ConfigureAwait(false);
-            if (source is null)
+            var bytes = await DocumentEditService.ReadBytesAsync(document.Path).ConfigureAwait(false);
+            if (bytes is null)
             {
                 await WriteNotFoundAsync(context.Response).ConfigureAwait(false);
                 return;
             }
 
+            var source = DocumentEditService.Decode(bytes);
             var nonce = Renderer.CreateNonce();
             var contentSecurityPolicy = Renderer.CreateContentSecurityPolicy(nonce);
             var theme = themeConfig.ReadTheme();
-            var html = Renderer.RenderDocument(document.Kind, source, document.Title, document.Id, writeToken, nonce, theme);
-            var bytes = Encoding.UTF8.GetBytes(html);
+            var html = Renderer.RenderDocument(document.Kind, source.Text, document.Title, document.Id, writeToken, nonce, theme, source.Hash);
+            var page = Encoding.UTF8.GetBytes(html);
             context.Response.StatusCode = (int)HttpStatusCode.OK;
             context.Response.ContentType = "text/html; charset=utf-8";
             context.Response.Headers["Content-Security-Policy"] = contentSecurityPolicy;
-            context.Response.ContentLength64 = bytes.Length;
-            await context.Response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
+            context.Response.ContentLength64 = page.Length;
+            await context.Response.OutputStream.WriteAsync(page).ConfigureAwait(false);
         }
         finally
         {
@@ -428,6 +448,133 @@ public sealed class ReaderServer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Entering edit mode. Returns the text the page will splice edits into, the hash a save
+    /// must match, and a fresh render whose block ranges index into exactly that text — the
+    /// page may be stale (a checkbox toggle rewrites the file without reloading it).
+    /// </summary>
+    private async Task BeginEditAsync(HttpListenerContext context, RegisteredDocument document)
+    {
+        try
+        {
+            if (await ReadTrustedEditRequestAsync(context).ConfigureAwait(false) is null) return;
+            var bytes = await DocumentEditService.ReadBytesAsync(document.Path).ConfigureAwait(false);
+            if (bytes is null)
+            {
+                await WriteNotFoundAsync(context.Response).ConfigureAwait(false);
+                return;
+            }
+            var source = DocumentEditService.Decode(bytes);
+            if (!source.Editable)
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.UnsupportedMediaType,
+                    "This file is not UTF-8 text, so it cannot be edited without changing its encoding.").ConfigureAwait(false);
+                return;
+            }
+            await WriteJsonAsync(context.Response, new
+            {
+                text = source.Text,
+                hash = source.Hash,
+                newline = source.Newline,
+                html = Renderer.RenderBody(document.Kind, source.Text, document.Id)
+            }).ConfigureAwait(false);
+        }
+        catch (JsonException)
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+        }
+        finally { context.Response.Close(); }
+    }
+
+    /// <summary>Renders unsaved text for the page. Writes nothing.</summary>
+    private async Task RenderEditAsync(HttpListenerContext context, RegisteredDocument document)
+    {
+        try
+        {
+            var request = await ReadTrustedEditRequestAsync(context).ConfigureAwait(false);
+            if (request is null) return;
+            if (request.Text is null)
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+                return;
+            }
+            await WriteJsonAsync(context.Response, new { html = Renderer.RenderBody(document.Kind, request.Text, document.Id) })
+                .ConfigureAwait(false);
+        }
+        catch (JsonException)
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+        }
+        finally { context.Response.Close(); }
+    }
+
+    private async Task SaveEditAsync(HttpListenerContext context, RegisteredDocument document)
+    {
+        try
+        {
+            var request = await ReadTrustedEditRequestAsync(context).ConfigureAwait(false);
+            if (request is null) return;
+            if (request.Text is null || (request.Hash is null && !request.Force))
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+                return;
+            }
+            var outcome = DocumentEditService.TrySave(document.Path, request.Text, request.Hash, request.Force, out var hash);
+            if (outcome == SaveOutcome.Conflict)
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.Conflict, "The file changed on disk.").ConfigureAwait(false);
+                return;
+            }
+            if (outcome == SaveOutcome.NotEditable)
+            {
+                await WriteStatusAsync(context.Response, HttpStatusCode.UnsupportedMediaType, "Not UTF-8 text.").ConfigureAwait(false);
+                return;
+            }
+            suppressedHashes[document.Id] = Convert.FromHexString(hash);
+            await WriteJsonAsync(context.Response, new { hash }).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is JsonException or EncoderFallbackException)
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.BadRequest, "Bad Request").ConfigureAwait(false);
+        }
+        finally { context.Response.Close(); }
+    }
+
+    /// <summary>
+    /// Same gate as every other write path: our own origin and the per-process token. On
+    /// failure the 4xx is already written and this returns null.
+    /// </summary>
+    private async Task<EditRequest?> ReadTrustedEditRequestAsync(HttpListenerContext context)
+    {
+        if (!string.Equals(context.Request.Headers["Origin"], $"http://127.0.0.1:{Port}", StringComparison.Ordinal))
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.Forbidden, "Forbidden").ConfigureAwait(false);
+            return null;
+        }
+        if (context.Request.ContentLength64 > MaximumEditBytes)
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.RequestEntityTooLarge, "Too Large").ConfigureAwait(false);
+            return null;
+        }
+        var request = await JsonSerializer.DeserializeAsync<EditRequest>(context.Request.InputStream).ConfigureAwait(false);
+        if (request is null || !CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(request.Token ?? string.Empty), Encoding.UTF8.GetBytes(writeToken)))
+        {
+            await WriteStatusAsync(context.Response, HttpStatusCode.Forbidden, "Forbidden").ConfigureAwait(false);
+            return null;
+        }
+        return request;
+    }
+
+    private static async Task WriteJsonAsync(HttpListenerResponse response, object value)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+        response.StatusCode = (int)HttpStatusCode.OK;
+        response.ContentType = "application/json; charset=utf-8";
+        response.ContentLength64 = bytes.Length;
+        await response.OutputStream.WriteAsync(bytes).ConfigureAwait(false);
+    }
+
     private static string NormalizeDialogPath(string path, bool appendMarkdown)
     {
         if (!Path.IsPathFullyQualified(path)) throw new ArgumentException("Dialog returned a relative path.", nameof(path));
@@ -566,44 +713,13 @@ public sealed class ReaderServer : IDisposable
         [property: JsonPropertyName("command")] string? Command,
         [property: JsonPropertyName("token")] string? Token);
 
+    private sealed record EditRequest(
+        [property: JsonPropertyName("token")] string? Token,
+        [property: JsonPropertyName("text")] string? Text,
+        [property: JsonPropertyName("hash")] string? Hash,
+        [property: JsonPropertyName("force")] bool Force);
+
     private sealed record SseMessage(string Event, string Data);
-
-    private static async Task<string?> ReadDocumentAsync(string path)
-    {
-        for (var attempt = 0; attempt < 4; attempt++)
-        {
-            try
-            {
-                await using var stream = new FileStream(
-                    path,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    bufferSize: 4096,
-                    useAsync: true);
-                using var reader = new StreamReader(stream);
-                return await reader.ReadToEndAsync().ConfigureAwait(false);
-            }
-            catch (IOException) when (attempt < 3)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(50 * (attempt + 1))).ConfigureAwait(false);
-            }
-            catch (UnauthorizedAccessException) when (attempt < 3)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(50 * (attempt + 1))).ConfigureAwait(false);
-            }
-            catch (IOException)
-            {
-                return null;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return null;
-            }
-        }
-
-        return null;
-    }
 
     private static Task WriteNotFoundAsync(HttpListenerResponse response) =>
         WriteStatusAsync(response, HttpStatusCode.NotFound, "Not Found");

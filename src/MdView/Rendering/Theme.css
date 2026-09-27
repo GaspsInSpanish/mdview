@@ -293,6 +293,94 @@ main {
   font-weight: 700;
 }
 
+/* The edit lock sits at the far end of the bar: a toggle, not a menu, so it reads as a
+   pressed Win98 button while editing. */
+.edit-lock {
+  margin-left: auto;
+  padding: calc(0.22rem + 1px) calc(0.7rem + 1px);
+  border: 1px solid;
+  border-color: var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer);
+  background: var(--bevel-face);
+  box-shadow: inset 1px 1px 0 var(--bevel-hi-inner), inset -1px -1px 0 var(--bevel-lo-inner);
+  color: var(--text);
+  font: inherit;
+  white-space: nowrap;
+}
+
+.edit-lock:hover { background: var(--bevel-face-hover); }
+
+.edit-lock[aria-checked="true"] {
+  padding: calc(0.22rem + 2px) 0.7rem 0.22rem calc(0.7rem + 2px);
+  border-color: var(--bevel-lo-outer) var(--bevel-hi-outer) var(--bevel-hi-outer) var(--bevel-lo-outer);
+  box-shadow: inset 1px 1px 0 var(--bevel-lo-inner), inset -1px -1px 0 var(--bevel-hi-inner);
+  font-weight: 700;
+}
+
+.edit-lock[data-dirty]::after { content: " \2022"; }
+
+.edit-lock:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -4px;
+}
+
+.md-source-only,
+[data-edit-hidden] { display: none; }
+
+:root[data-editing] #reader-content > [data-md-start] { cursor: text; }
+
+:root[data-editing] #reader-content > [data-md-start]:hover {
+  outline: 1px dashed var(--muted);
+  outline-offset: 4px;
+}
+
+:root[data-editing] .md-source-only {
+  display: block;
+  margin: 0 0 1.15em;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+:root[data-editing] #reader-content > [data-edit-hidden] { display: none; }
+
+.md-editor {
+  display: block;
+  width: 100%;
+  margin: 0 0 1.15em;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  overflow: hidden;
+  resize: none;
+  tab-size: 4;
+}
+
+.md-editor:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* A pseudo-element, so the prompt is never document text: Find, Select All and Copy
+   cannot pick it up. Clicks on it land on the reader element itself, which edit.js
+   reads as "append". */
+:root[data-editing] #reader-content::after {
+  display: block;
+  margin-top: 2rem;
+  padding: 0.75rem;
+  border: 1px dashed var(--muted);
+  color: var(--muted);
+  content: "Click here to add text at the end";
+  cursor: text;
+  font-size: 0.875rem;
+  text-align: center;
+}
+
 ::highlight(mdview-find-results) {
   background: color-mix(in srgb, var(--accent) 45%, transparent);
   color: var(--text);

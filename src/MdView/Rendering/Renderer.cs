@@ -35,18 +35,14 @@ public static class Renderer
 
     /// <summary>Renders a supported document format as a complete, self-contained HTML5 document.</summary>
     public static string RenderDocument(DocumentKind kind, string document, string title, string documentId = "", string writeToken = "",
-        string? cspNonce = null, ThemePreference theme = ThemePreference.System)
+        string? cspNonce = null, ThemePreference theme = ThemePreference.System, string sourceHash = "")
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(title);
         cspNonce ??= CreateNonce();
         var contentSecurityPolicy = CreateContentSecurityPolicy(cspNonce);
 
-        var body = kind switch
-        {
-            DocumentKind.Markdown => MarkdownRenderer.RenderBody(document, documentId),
-            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported document kind.")
-        };
+        var body = RenderBody(kind, document, documentId);
         var html = new StringBuilder();
         html.AppendLine("<!doctype html>");
         html.Append("<html lang=\"en\"");
@@ -70,10 +66,12 @@ public static class Renderer
         html.AppendLine("</main>");
         html.Append("<script nonce=\"").Append(cspNonce).AppendLine("\">");
         html.Append("window.mdviewToggle={id:").Append(System.Text.Json.JsonSerializer.Serialize(documentId)).Append(",token:").Append(System.Text.Json.JsonSerializer.Serialize(writeToken)).AppendLine("};");
+        html.Append("window.mdviewEdit={hash:").Append(System.Text.Json.JsonSerializer.Serialize(sourceHash)).AppendLine("};");
         html.AppendLine("</script>");
         AppendScript(html, cspNonce, Assets.LoadScript("page.js"));
         AppendScript(html, cspNonce, Assets.LoadScript("fold.js"));
         AppendScript(html, cspNonce, Assets.LoadScript("menu.js"));
+        AppendScript(html, cspNonce, Assets.LoadScript("edit.js"));
 
         foreach (var script in HighlightScripts)
         {
@@ -85,18 +83,27 @@ public static class Renderer
         return html.ToString();
     }
 
+    /// <summary>Renders only the reader body, as edit mode swaps it in after a change.</summary>
+    internal static string RenderBody(DocumentKind kind, string document, string documentId) => kind switch
+    {
+        DocumentKind.Markdown => MarkdownRenderer.RenderBody(document, documentId),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported document kind.")
+    };
+
     private static void AppendMenuBar(StringBuilder html, ThemePreference theme)
     {
         html.AppendLine("<nav class=\"menu-bar\" role=\"menubar\" aria-label=\"Application menu\">");
         AppendMenu(html, "file", "File",
-            [("New", "Ctrl+N", "file.new"), ("Open…", "Ctrl+O", "file.open"),
-             ("Save As…", "Ctrl+Shift+S", "file.save-as"), ("Exit", "Alt+F4", "file.exit")], 3);
+            [("New", "Ctrl+N", "file.new"), ("Open…", "Ctrl+O", "file.open"), ("Save", "Ctrl+S", "file.save"),
+             ("Save As…", "Ctrl+Shift+S", "file.save-as"), ("Exit", "Alt+F4", "file.exit")], 4);
         AppendMenu(html, "edit", "Edit",
             [("Copy", "Ctrl+C", "edit.copy"), ("Select All", "Ctrl+A", "edit.select-all"),
              ("Find…", "Ctrl+F", "edit.find")]);
         AppendMenu(html, "view", "View",
             [("Collapse All", "", "view.collapse-all"), ("Expand All", "", "view.expand-all")]);
         AppendThemeMenu(html, theme);
+        // The edit lock. Locked is the default on every page load; edit.js flips it.
+        html.AppendLine("<button class=\"edit-lock\" type=\"button\" role=\"menuitemcheckbox\" aria-checked=\"false\" title=\"Unlock to edit this file (Ctrl+E)\">Locked</button>");
         html.AppendLine("</nav>");
     }
 
@@ -113,7 +120,7 @@ public static class Renderer
             var item = items[index];
             html.Append("<button class=\"menu-item\" type=\"button\" role=\"menuitem\" tabindex=\"-1\" data-command=\"")
                 .Append(item.Command).Append('"');
-            if (item.Command == "edit.copy") html.Append(" aria-disabled=\"true\"");
+            if (item.Command is "edit.copy" or "file.save") html.Append(" aria-disabled=\"true\"");
             html.Append("><span>").Append(item.Label).Append("</span><span class=\"menu-accelerator\">")
                 .Append(item.Accelerator).AppendLine("</span></button>");
         }

@@ -9,7 +9,10 @@
 
   if (window.mdviewToggle.id) {
     const events = new EventSource(`/events/${encodeURIComponent(window.mdviewToggle.id)}`);
-    events.addEventListener('reload', () => location.reload());
+    // Unsaved edits outrank a reload; edit mode flags the file as changed on disk instead.
+    events.addEventListener('reload', () => {
+      if (!window.mdviewEdit?.onExternalChange?.()) location.reload();
+    });
     events.addEventListener('theme', event => window.mdviewApplyTheme(event.data));
   }
 

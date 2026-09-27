@@ -17,6 +17,7 @@ ValidateThemeRendering(markdown, title);
 ValidateAlerts();
 ValidateFrontMatter();
 ValidateExtensions();
+ValidateSourceRanges(args[0]);
 await File.WriteAllTextAsync(args[1], document);
 Console.WriteLine("render-menu=passed");
 Console.WriteLine("render-csp-nonces=passed");
@@ -25,6 +26,7 @@ Console.WriteLine("render-edit=passed");
 Console.WriteLine("render-alerts=passed");
 Console.WriteLine("render-frontmatter=passed");
 Console.WriteLine("render-extensions=passed");
+Console.WriteLine("render-source-ranges=passed");
 return 0;
 
 static void ValidateMenuShell(string html)
@@ -37,7 +39,7 @@ static void ValidateMenuShell(string html)
 
     var expectedCommands = new[]
     {
-        "file.new", "file.open", "file.save-as", "file.exit",
+        "file.new", "file.open", "file.save", "file.save-as", "file.exit",
         "edit.copy", "edit.select-all", "edit.find",
         "view.collapse-all", "view.expand-all",
         "theme.system", "theme.light", "theme.dark"
@@ -51,9 +53,9 @@ static void ValidateMenuShell(string html)
     var shellEnd = html.IndexOf("<script", StringComparison.OrdinalIgnoreCase);
     Ensure(shellEnd >= 0, "Rendered document had no scripts.");
     var shell = html[..shellEnd];
-    foreach (var label in new[] { ">File<", ">New<", ">Open…<", ">Save As…<", ">Exit<", ">Edit<", ">Copy<", ">Select All<", ">Find…<", ">View<", ">Collapse All<", ">Expand All<", ">Theme<", ">System<", ">Light<", ">Dark<" })
+    foreach (var label in new[] { ">File<", ">New<", ">Open…<", ">Save<", ">Save As…<", ">Exit<", ">Edit<", ">Copy<", ">Select All<", ">Find…<", ">View<", ">Collapse All<", ">Expand All<", ">Theme<", ">System<", ">Light<", ">Dark<" })
         Ensure(shell.Contains(label, StringComparison.Ordinal), $"Menu label '{label[1..^1]}' was missing.");
-    foreach (var accelerator in new[] { "Ctrl+N", "Ctrl+O", "Ctrl+Shift+S", "Alt+F4", "Ctrl+C", "Ctrl+A", "Ctrl+F" })
+    foreach (var accelerator in new[] { "Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Alt+F4", "Ctrl+C", "Ctrl+A", "Ctrl+F" })
         Ensure(shell.Contains($">{accelerator}<", StringComparison.Ordinal), $"Accelerator '{accelerator}' was missing.");
 
     Ensure(tags.Count(tag => HasAttribute(tag, "role", "menubar")) == 1, "Menubar role was missing or duplicated.");
@@ -90,7 +92,7 @@ static void ValidateMenuShell(string html)
 
     var foldScript = Assets.LoadScript("fold.js");
     Ensure(html.Contains(foldScript, StringComparison.Ordinal) &&
-        foldScript.Contains("window.mdviewFold = { reveal, collapseAll, expandAll }", StringComparison.Ordinal),
+        foldScript.Contains("window.mdviewFold = { reveal, collapseAll, expandAll, refresh }", StringComparison.Ordinal),
         "fold.js was not embedded in the rendered page with the required API.");
 
     var css = Assets.LoadTheme();
@@ -191,6 +193,75 @@ static void ValidateEditFeatures(string html)
     foreach (var token in new[] { "--bevel-face", "--bevel-hi-outer", "--bevel-hi-inner", "--bevel-lo-inner", "--bevel-lo-outer" })
         Ensure(findRules.Contains($"var({token})", StringComparison.Ordinal), $"Find bar does not reuse {token}.");
 }
+
+// Edit mode reveals, and splices edits into, exactly the source range stamped on each block.
+// A range that is wrong edits the wrong bytes of the user's file, so the invariants are
+// checked against hand-built edge cases and against every real Markdown file in this repo.
+static void ValidateSourceRanges(string inputPath)
+{
+    var fixtures = new List<(string Name, string Source)>
+    {
+        ("edge-cases", "---\ntitle: x\n---\n# Head\n\nPara with [ref][r] and note[^1] and HTML.\nlazy line\n\n[r]: https://example.com\n\n" +
+            "*[HTML]: Hyper Text\n\n- [ ] one\n- [x] two\n  nested\n\n1. a\n2. b\n\n> [!NOTE]\n> alert\n\n> quote [q]: no\n>\n> [z]: https://z\n\n" +
+            "```cs\ncode\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n+---+---+\n| x | y |\n+---+---+\n\nTerm\n:   def\n\n:::warn\ncontained\n:::\n\n" +
+            "^^^\n![i](https://x/y.png)\n^^^ Cap\n\nSetext\n======\n\n    indented\n\n***\n\n<div onclick=\"x\">raw</div>\n\n[^1]: The note\n    continued.\n\nEnd."),
+        ("empty", ""),
+        ("whitespace-only", "\n\n  \n"),
+        ("no-trailing-newline", "# Only\n\ntext"),
+        ("lazy-continuations", "> quote\nlazy\n\n- item\nlazy item\n  - nested\n  lazy nested\n\n> > deep\nlazy deep\n\n1. one\n\n   para two\nlazy\n"),
+    };
+    fixtures.Add(("edge-cases-crlf", fixtures[0].Source.Replace("\n", "\r\n")));
+    var root = Path.GetDirectoryName(Path.GetFullPath(inputPath))!;
+    while (!File.Exists(Path.Combine(root, "AGENTS.md")) && Path.GetDirectoryName(root) is { } parent) root = parent;
+    foreach (var file in Directory.EnumerateFiles(root, "*.md", SearchOption.AllDirectories)
+        .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}") &&
+            !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")))
+        fixtures.Add((Path.GetRelativePath(root, file), File.ReadAllText(file)));
+    Ensure(fixtures.Count >= 8, $"Only {fixtures.Count} range fixtures were found; the repo scan went vacuous.");
+    Console.WriteLine($"source-range-fixtures={fixtures.Count}");
+
+    var stamp = new Regex(@"\sdata-md-start=""(?<start>\d+)"" data-md-end=""(?<end>\d+)""", RegexOptions.CultureInvariant);
+    foreach (var (name, source) in fixtures)
+    {
+        var body = MarkdownRenderer.RenderBody(source, "document");
+        var ranges = stamp.Matches(body).Select(match => (Start: int.Parse(match.Groups["start"].Value), End: int.Parse(match.Groups["end"].Value))).ToArray();
+        var previousEnd = 0;
+        var covered = new bool[source.Length];
+        foreach (var (start, end) in ranges)
+        {
+            Ensure(start >= previousEnd && start < end && end <= source.Length,
+                $"{name}: range [{start},{end}) overlaps, is out of order, or is out of bounds (previous end {previousEnd}, length {source.Length}).");
+            Ensure(source[start..end].Trim().Length > 0, $"{name}: range [{start},{end}) is blank.");
+            Ensure(source[end - 1] is not ('\n' or '\r'), $"{name}: range [{start},{end}) ends in a line break.");
+            for (var index = start; index < end; index++) covered[index] = true;
+            previousEnd = end;
+        }
+        for (var index = 0; index < source.Length; index++)
+            Ensure(covered[index] || char.IsWhiteSpace(source[index]),
+                $"{name}: source character {index} ({source[index]}) in \"{Excerpt(source, index)}\" is not inside any editable block.");
+
+        // Stamping a block at a time must not change what the page renders.
+        var whole = UriSanitizer.SanitizeHtml(Markdig.Markdown.ToHtml(Markdig.Markdown.Parse(source, MarkdownRenderer.Pipeline), MarkdownRenderer.Pipeline)
+            .Replace("<pre><code>", "<pre><code class=\"language-plaintext\">"));
+        var unstamped = Regex.Replace(stamp.Replace(body, ""), """<div class="md-source-only[^"]*"></div>\n""", "");
+        Ensure(unstamped == whole.Replace("data-document=\"\"", "data-document=\"document\""),
+            $"{name}: per-block rendering differs from rendering the whole document.");
+    }
+
+    // The stamp is added after sanitizing, so document content must never be able to forge one.
+    Ensure(!UriSanitizer.SanitizeHtml("<p data-md-start=\"0\" data-md-end=\"9\">x</p>").Contains("data-md-", StringComparison.Ordinal),
+        "The sanitizer lets data-md-* attributes through, so a document could forge an edit range.");
+    var forged = MarkdownRenderer.RenderBody("para {data-md-start=0 data-md-end=4}\n\n<p data-md-start=\"0\">raw</p>", "document");
+    Ensure(stamp.Matches(forged).Count == 2, "Document content produced an extra data-md-* stamp.");
+}
+
+// Content checks compare markup literally; the edit-range stamp is asserted on its own in
+// render-source-ranges, so it is removed here rather than written into every expectation.
+static string Unstamped(string html) =>
+    Regex.Replace(html, @" data-md-start=""\d+"" data-md-end=""\d+""", "", RegexOptions.CultureInvariant);
+
+static string Excerpt(string source, int index) =>
+    source.Substring(Math.Max(0, index - 20), Math.Min(40, source.Length - Math.Max(0, index - 20))).ReplaceLineEndings("⏎");
 
 static void ValidateThemeRendering(string markdown, string title)
 {
@@ -297,7 +368,7 @@ static void ValidateExtensions()
     static string Body(string markdown)
     {
         var html = Renderer.RenderDocument(markdown, "ext");
-        var body = html[html.IndexOf("<main", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)];
+        var body = Unstamped(html[html.IndexOf("<main id=\"reader-content\"", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)]);
         return body[(body.IndexOf('>') + 1)..];
     }
 
@@ -352,7 +423,7 @@ static void ValidateFrontMatter()
 {
     const string source = "---\ntitle: My Doc\ntags: [a, b]\n---\n\n# Heading\n\n- [ ] first task\n- [x] second task\n\nText.\n\n- [ ] third task\n";
     var html = Renderer.RenderDocument(source, "frontmatter");
-    var body = html[html.IndexOf("<main", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)];
+    var body = Unstamped(html[html.IndexOf("<main id=\"reader-content\"", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)]);
 
     Ensure(!body.Contains("title: My Doc", StringComparison.Ordinal) &&
         !body.Contains("tags:", StringComparison.Ordinal),
@@ -406,7 +477,7 @@ static void ValidateAlerts()
 > Plain quote.
 """;
     var html = Renderer.RenderDocument(source, "alerts");
-    var body = html[html.IndexOf("<main", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)];
+    var body = Unstamped(html[html.IndexOf("<main id=\"reader-content\"", StringComparison.Ordinal)..html.IndexOf("</main>", StringComparison.Ordinal)]);
 
     string[] kinds = ["note", "tip", "important", "warning", "caution"];
     foreach (var kind in kinds)

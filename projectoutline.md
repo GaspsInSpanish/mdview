@@ -18,30 +18,17 @@ Installed from a GitHub Releases installer.
 This is a deliberate release boundary, not an oversight — do not implement other
 formats ahead of it.
 
-**Non-goals.** No general editing — no text cursor, no free-form modification, no
-file browser or sidebar, no tabs, no cloud, account, or telemetry. No Markdown
-dialect beyond CommonMark + GFM.
+**Non-goals.** No file browser or sidebar, no tabs, no cloud, account, or telemetry.
+No Markdown dialect beyond CommonMark + GFM. No WYSIWYG: the page is never converted
+from HTML back into Markdown.
 
-**One deliberate exception (v1.1):** clicking a GFM task-list checkbox toggles
-`[ ]` ↔ `[x]` in the source file. This is a knowing, scoped reversal of the original
-"does not edit" rule — see the §5 decision-log entry for the reasoning and the line
-that replaced it. The boundary is now: *mdview may toggle an existing checkbox, and
-may change nothing else.* Any proposal to edit anything beyond that is a new
-architecture decision, not an extension of this one.
-
-### Why not an off-the-shelf option
-
-Evaluated at kickoff and rejected, recorded so it isn't re-litigated:
-
-| Option | Why rejected |
-|---|---|
-| Brave "Markdown Viewer" extension | Ships GitHub-family themes — the exact look being escaped |
-| VS Code built-in preview | Not Brave; VS Code's own styling |
-| `pandoc` → HTML | Still requires writing the CSS, so it saves nothing |
-
-No browser renders `.md` natively; rendering always needs an extension or a
-pre-render step. Since the Claude styling *is* the requirement, custom was the only
-path that answers it.
+**Editing is opt-in, behind a lock (v1.3).** Every page loads **locked**, and reading
+behaves exactly as before. The owner widened scope twice, knowingly, and each is a
+decision-log entry: v1.1 let a click toggle an existing task checkbox; v1.3 adds an
+edit lock (menu-bar button, Ctrl+E). While unlocked, clicking a block reveals *that
+block's own Markdown source* in place, and Ctrl+S writes the file. The boundary now
+is: *mdview edits only when unlocked, only by splicing source text the user typed,
+and never rewrites a byte outside the blocks they touched.* §7 is the protocol.
 
 ## 2. Architecture
 
@@ -77,7 +64,8 @@ mdview.exe  --- Mutex "Local\mdview-singleton" already held? ---+
 | `Renderer` | Dispatches on `DocumentKind` to a format renderer, then wraps the result in the shared HTML shell (Claude CSS + hljs). Pure; no I/O beyond reading the file |
 | `MarkdownRenderer` | The one `DocumentKind` implemented in v1: Markdig pipeline + URI sanitizer |
 | `DocumentRegistry` | Opaque id ⇄ absolute path. **The security boundary** — only registered ids are servable |
-| `ReaderServer` | `HttpListener` on loopback. Routes `/d/{id}`, `/assets/{name}`, `/events/{id}`, `POST /open` |
+| `ReaderServer` | `HttpListener` on loopback. Routes `/d/{id}`, `/events/{id}`, `POST /open`, and the token-gated writes `/toggle`, `/theme`, `/command/{id}`, `/source/{id}`, `/render/{id}`, `/save/{id}` |
+| `DocumentEditService` | Edit mode's write path: decode (UTF-8 only is editable), hash-checked save, BOM restore, atomic replace |
 | `FileWatcher` | `FileSystemWatcher` per open doc, debounced, pushes reload over SSE |
 | `BraveLauncher` | Locates `brave.exe`, launches `--app=` |
 | `InstanceCoordinator` | Named mutex, handshake file, hand-off to the running instance |
@@ -166,6 +154,11 @@ association, single-instance forwarding, and uninstall cleanliness.
 | `GraceExpired`/`StartupExpired` check state under the lock, release it, then call `Shutdown()` which re-acquires it. A client connecting in that sub-microsecond gap would still be dropped. | **Accepted.** Closing it fully means committing the shutdown flag under the same lock as the check. The current shape deliberately releases the lock before doing I/O (`DeleteHandshake`, `server.Dispose`) to avoid deadlocking against event callbacks that also take the lock — that tradeoff is correct. Practical consequence is a page that needs reopening, at negligible probability. Revisit only if it is ever actually observed. |
 | Windows will not let an installer silently seize the default handler for an extension (by design since Win8). | The installer registers the ProgId and capability; the user confirms once in Windows' own prompt. Documented in the README rather than worked around. |
 
+| A save or checkbox toggle suppresses the echo reload for **every** window on that document, not just the one that wrote. A second window on the same file stays stale until the next external change. | **Accepted, data-safe.** Pre-dates edit mode (toggles had it). The stale window cannot clobber anything: entering edit mode fetches fresh text, and its saves are hash-checked, so they 409 rather than overwrite. Fixing it means tagging each SSE client and excluding only the writer. |
+| Saves (and toggles) write a temp file and rename it over the original, so the file is a new file: a hard link to it is broken and NTFS alternate streams/ACL customisations on the old file are not carried over. | **Accepted.** The trade is that a crash can never leave a half-written document. Same as Notepad-class editors. |
+| Edit mode has no document-wide undo. Ctrl+Z works inside the open block; once a block is closed its change is only undone by editing again, or by leaving without saving. There is no Discard button: reload (or close) and confirm leaving. | **Accepted for v1.3.** Revisit if the owner finds it missing in use. |
+| UTF-16 and legacy-codepage `.md` files render but cannot be unlocked. | **Deliberate.** Saving would transcode them. The page says why when unlock is refused. |
+
 ## 5. Decision log
 
 | Date | Decision | Rationale |
@@ -178,13 +171,15 @@ association, single-instance forwarding, and uninstall cleanliness.
 | 2026-09-15 | `PublishTrimmed=false` | Markdig + `HttpListener` reflection vs a few MB — bad trade |
 | 2026-09-15 | Installer built by GitHub Actions on `windows-latest` | Inno Setup is Windows-only; also sidesteps cross-building from WSL |
 | 2026-09-16 | Checkboxes become clickable and **write back to the file**, reversing "no editing" | A visual-only toggle was rejected as dishonest: the file would still say `[ ]` and the next live-reload would silently revert every tick. Between "not interactive" and "interactive and truthful", the user chose truthful. Scope is deliberately drawn at *toggling an existing checkbox* so this doesn't become a wedge for general editing. Consequence accepted: the threat model changes from read-only to read-write, mitigated by a write token + `Origin` check (§7) |
+| 2026-09-27 | **Edit mode behind a lock**, reversing "no general editing" (owner request) | The owner chose "type in the rendered view" over a raw-source editor, then, shown the two ways to build that, chose **reveal-source-in-place** over true WYSIWYG. WYSIWYG would convert edited HTML back into Markdown, reformatting each touched block (`*a*` → `_a_`, joined lines) and needing a new dependency. Revealing the clicked block's own source keeps the file byte-exact outside what was typed, and works for every block kind, tables and code included. Explicit Ctrl+S over autosave (owner choice). Locked by default so reading is unchanged. Threat model unchanged in kind (already read-write since v1.1); the new endpoints sit behind the same token + `Origin` gate. |
 | 2026-09-15 | v1 ships `.md` only; more formats post-v1 | User decision. A `DocumentKind` seam goes in at S2 so later formats are an addition, not a refactor of the registry/server/installer together |
 
 ---
 
-## 7. Write-back protocol (v1.1)
+## 7. Write-back protocol (v1.1, extended v1.3)
 
-The only write path in the product. Treat every rule here as load-bearing.
+The product's write paths: checkbox toggle (v1.1) and edit mode (v1.3, at the end of
+this section). Treat every rule here as load-bearing.
 
 **Locating the checkbox.** Markdig's precise source location gives each task item its
 line number; the renderer emits `data-line` on the `<input>`. Never match on text
@@ -214,6 +209,39 @@ to land inside it.
 silently modify files the user has open. A random per-process token embedded in the
 page, plus an `Origin` check, keeps the write path reachable only from our own page.
 The document id alone is not sufficient: it is visible in the browser's URL.
+
+### Edit mode (v1.3)
+
+**Ranges, not conversion.** The renderer renders each top-level block separately and
+stamps it with `data-md-start`/`data-md-end`: UTF-16 offsets of the exact source it
+came from. The stamp is appended **after** sanitizing, and `data-md-*` is not on the
+sanitizer allowlist, so document content cannot forge or shift a range. Source that
+renders nothing or renders elsewhere (frontmatter, link and footnote definitions,
+abbreviations) gets an empty `md-source-only` placeholder at its real position, so
+every non-blank character of the file is reachable. `RenderProbe` asserts that
+invariant, and that per-block rendering is byte-identical to the whole-document
+render, against edge fixtures and every `.md` in the repo.
+
+**Unlock.** `POST /source/{id}` returns the file's text, its SHA-256, its dominant
+newline, and a fresh render. The page's own ranges may be stale (a checkbox toggle
+rewrites the file without reloading), so the page swaps in the fresh render unless the
+hash proves it current. Non-UTF-8 files answer 415 and stay locked.
+
+**Editing is client-side splicing.** Clicking a block opens a textarea holding that
+slice (CRLF shown as LF). Leaving it splices the text back, converting LF to the
+file's newline, and `POST /render/{id}` re-renders the unsaved text; `/render` writes
+nothing. An unchanged block is never spliced. Bytes outside touched blocks are
+carried through verbatim.
+
+**Save.** `POST /save/{id}` with the full text and the hash editing began from. The
+server re-reads the file: hash mismatch → 409 (the page offers overwrite, which resends
+with `force`); a deleted file → 409 unless forced; non-UTF-8 → 415; unpaired surrogate
+→ 400. The BOM is restored from the file on disk, the write is temp+rename, and the
+echo is suppressed by content hash exactly as for toggles.
+
+**Unsaved edits outrank live reload.** A reload event while there are unsaved edits
+marks the lock "changed on disk" instead of reloading; the next save then meets the
+409. With no unsaved edits the page reloads and returns to edit mode.
 
 ## 5a. v1.2 — Menu bar (planned 2026-09-16)
 

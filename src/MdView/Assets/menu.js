@@ -229,7 +229,13 @@
           } finally {
             item.disabled = false;
           }
+        } else if (command === 'file.save') {
+          await window.mdviewEdit?.save();
         } else if (command.startsWith('file.')) {
+          if (window.mdviewEdit && !await window.mdviewEdit.settle(command)) {
+            closeMenu(true);
+            return;
+          }
           item.disabled = true;
           try {
             const response = await fetch(`/command/${encodeURIComponent(window.mdviewToggle.id)}`, {
@@ -301,6 +307,12 @@
   window.addEventListener('resize', () => {
     if (openIndex >= 0) keepPanelInViewport(menus[openIndex].querySelector('.menu-panel'));
   });
+  // Edit mode re-rendered the document: old match ranges point into removed nodes.
+  reader.addEventListener('mdview:content-replaced', () => {
+    if (findBar.hidden) return;
+    clearTimeout(searchTimer);
+    runSearch();
+  });
   findQuery.addEventListener('input', scheduleSearch);
   findQuery.addEventListener('keydown', event => {
     if (event.key === 'Enter') {
@@ -319,16 +331,18 @@
   });
   document.addEventListener('keydown', event => {
     const control = event.ctrlKey && !event.altKey && !event.metaKey;
-    const editingFind = event.target === findQuery;
+    // Typing in Find or in an edit-mode textarea keeps the native text shortcuts, and Alt
+    // stays with the textarea so Windows Alt+numpad character entry still works.
+    const editingText = event.target === findQuery || event.target.matches?.('textarea');
     if (control && event.key.toLowerCase() === 'f') {
       if (openFind()) event.preventDefault();
-    } else if (control && event.key.toLowerCase() === 'a' && !editingFind) {
+    } else if (control && event.key.toLowerCase() === 'a' && !editingText) {
       event.preventDefault();
       selectDocument();
-    } else if (control && event.key.toLowerCase() === 'c' && !editingFind && selectionText()) {
+    } else if (control && event.key.toLowerCase() === 'c' && !editingText && selectionText()) {
       event.preventDefault();
       void copySelection();
-    } else if (event.key === 'Alt' && !event.repeat) {
+    } else if (event.key === 'Alt' && !event.repeat && !editingText) {
       event.preventDefault();
       closeMenu();
       buttons[0].focus();

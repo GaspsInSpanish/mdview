@@ -1,8 +1,11 @@
 using Markdig;
+using Markdig.Extensions.Abbreviations;
 using Markdig.Extensions.Alerts;
 using Markdig.Extensions.CustomContainers;
 using Markdig.Extensions.AutoIdentifiers;
 using Markdig.Extensions.TaskLists;
+using Markdig.Extensions.Footnotes;
+using Markdig.Extensions.Yaml;
 using Markdig.Renderers;
 using Markdig.Renderers.Html;
 using Markdig.Syntax;
@@ -12,7 +15,7 @@ namespace MdView.Rendering;
 /// <summary>Renders Markdown source into safe body HTML.</summary>
 internal static class MarkdownRenderer
 {
-    private static readonly MarkdownPipeline Pipeline = BuildPipeline();
+    internal static readonly MarkdownPipeline Pipeline = BuildPipeline();
 
     private static MarkdownPipeline BuildPipeline()
     {
@@ -43,12 +46,99 @@ internal static class MarkdownRenderer
         return builder.Build();
     }
 
+    /// <summary>
+    /// Renders one top-level block at a time so each can be stamped with the source range
+    /// it came from; edit mode reveals exactly that slice of the file for editing. The
+    /// stamp is added <em>after</em> sanitizing, and <c>data-md-*</c> is not on the
+    /// sanitizer allowlist, so document content can never forge or move a range.
+    /// </summary>
     internal static string RenderBody(string markdown, string documentId)
     {
         using var scope = TaskRenderContext.Push(documentId);
         var document = Markdown.Parse(markdown, Pipeline);
-        return UriSanitizer.SanitizeHtml(Markdown.ToHtml(document, Pipeline)
-            .Replace("<pre><code>", "<pre><code class=\"language-plaintext\">"));
+        using var writer = new StringWriter();
+        var renderer = new HtmlRenderer(writer);
+        Pipeline.Setup(renderer);
+        var fragments = new List<(int Order, string Html)>();
+        var blockRanges = new List<(int Start, int End)>();
+        var placeholders = new List<(string Kind, int Start, int End)>();
+        foreach (var block in document)
+        {
+            if (block is LinkReferenceDefinitionGroup definitions)
+            {
+                // The parser gathers every `[label]: url` line into one group at the first
+                // definition's position, with a span that is not the definitions' own. Each
+                // definition gets its own placeholder, ordered by where it really sits.
+                // A footnote's definition span covers only its `[^label]`, and its body is a
+                // separate block rendered at the end of the page, so the two are joined.
+                foreach (var definition in definitions.OfType<LinkReferenceDefinition>())
+                    placeholders.Add(definition is FootnoteLinkReferenceDefinition footnote
+                        ? ("footnote", definition.Span.Start, TrimmedRange(markdown, SourceRange(footnote.Footnote)).End)
+                        : ("definition", definition.Span.Start, definition.Span.End + 1));
+                continue;
+            }
+            if (block is YamlFrontMatterBlock)
+            {
+                // Renders nothing, but is part of the file and must stay editable.
+                var (start, end) = TrimmedRange(markdown, SourceRange(block));
+                placeholders.Add(("frontmatter", start, end));
+                continue;
+            }
+            writer.GetStringBuilder().Clear();
+            renderer.Render(block);
+            writer.Flush();
+            var fragment = UriSanitizer.SanitizeHtml(writer.ToString()
+                .Replace("<pre><code>", "<pre><code class=\"language-plaintext\">"));
+            if (block is FootnoteGroup || block.Span.IsEmpty)
+            {
+                // Footnotes render after everything else, whatever their position in the source.
+                fragments.Add((int.MaxValue, fragment));
+                continue;
+            }
+            var range = TrimmedRange(markdown, SourceRange(block));
+            blockRanges.Add(range);
+            fragments.Add((range.Start, StampSourceRange(fragment, range)));
+        }
+        // Abbreviation definitions are lifted out of the block tree entirely.
+        foreach (var abbreviation in document.GetAbbreviations()?.Values ?? Enumerable.Empty<Abbreviation>())
+            placeholders.Add(("abbreviation", abbreviation.Span.Start, abbreviation.Span.End + 1));
+        // A definition nested in a quote or list is already inside that block's range.
+        foreach (var (kind, start, end) in placeholders)
+            if (!blockRanges.Any(range => start >= range.Start && start < range.End))
+                fragments.Add((start, SourceOnly(kind, start, end)));
+        return string.Concat(fragments.OrderBy(fragment => fragment.Order).Select(fragment => fragment.Html));
+    }
+
+    private static string SourceOnly(string kind, int start, int end) =>
+        FormattableString.Invariant($"<div class=\"md-source-only md-source-{kind}\" data-md-start=\"{start}\" data-md-end=\"{end}\"></div>\n");
+
+    private static string StampSourceRange(string fragment, (int Start, int End) range)
+    {
+        var offset = 0;
+        while (offset < fragment.Length && char.IsWhiteSpace(fragment[offset])) offset++;
+        if (offset + 1 >= fragment.Length || fragment[offset] != '<' || !char.IsAsciiLetter(fragment[offset + 1]))
+            return fragment;
+        // Appended after the tag's own attributes, which stay byte-identical. Attribute values
+        // are escaped by the renderer, so the first '>' closes the tag.
+        var close = fragment.IndexOf('>', offset);
+        if (close < 0) return fragment;
+        if (fragment[close - 1] == '/') close -= fragment[close - 2] == ' ' ? 2 : 1;
+        return fragment.Insert(close, FormattableString.Invariant(
+            $" data-md-start=\"{range.Start}\" data-md-end=\"{range.End}\""));
+    }
+
+    /// <summary>Start and exclusive end of a block's source. Container spans already cover
+    /// their children, lazy continuation lines included (asserted by RenderProbe).</summary>
+    internal static (int Start, int End) SourceRange(Block block) => (block.Span.Start, block.Span.End + 1);
+
+    /// <summary>Like <see cref="SourceRange(Block)"/>, minus trailing line breaks: some spans
+    /// (lists) swallow one, and handing it to the editor invites deleting the blank line
+    /// that separates this block from the next.</summary>
+    internal static (int Start, int End) TrimmedRange(string markdown, (int Start, int End) range)
+    {
+        var end = Math.Min(range.End, markdown.Length);
+        while (end > range.Start && markdown[end - 1] is '\n' or '\r') end--;
+        return (range.Start, end);
     }
 
     internal static bool IsExpectedTask(string markdown, int oneBasedLine, bool expectedChecked)

@@ -33,9 +33,14 @@ if (args.Length == 1 && args[0] == "--files")
     return await RunFileChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--edit")
+{
+    return await RunEditChecksAsync();
+}
+
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit");
     return 1;
 }
 
@@ -105,6 +110,182 @@ static async Task<int> RunFileChecksAsync()
     failed |= !await RunCheckAsync("files-new-and-cancel", CheckNewAndCancelAsync);
     failed |= !await RunCheckAsync("files-modal-lifecycle-hold", CheckModalLifecycleHoldAsync);
     return failed ? 1 : 0;
+}
+
+static async Task<int> RunEditChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("edit-begin-returns-exact-source", CheckEditBeginAsync);
+    failed |= !await RunCheckAsync("edit-save-preserves-untouched-bytes", CheckEditSavePreservationAsync);
+    failed |= !await RunCheckAsync("edit-conflict-and-force", CheckEditConflictAsync);
+    failed |= !await RunCheckAsync("edit-token-and-origin", CheckEditAuthorizationAsync);
+    failed |= !await RunCheckAsync("edit-refuses-non-utf8", CheckEditEncodingAsync);
+    failed |= !await RunCheckAsync("edit-rejects-unpaired-surrogate", CheckEditSurrogateAsync);
+    failed |= !await RunCheckAsync("edit-echo-suppression-and-external-reload", CheckEditEchoAsync);
+    failed |= !await RunCheckAsync("edit-render-is-sanitized-and-writes-nothing", CheckEditRenderAsync);
+    failed |= !await RunCheckAsync("edit-after-toggle-refreshes-ranges", CheckEditAfterToggleAsync);
+    return failed ? 1 : 0;
+}
+
+static string Sha256Hex(byte[] bytes) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+
+static (int Start, int End)[] Ranges(string html) =>
+    Regex.Matches(html, @"data-md-start=""(?<start>\d+)"" data-md-end=""(?<end>\d+)""")
+        .Select(match => (int.Parse(match.Groups["start"].Value), int.Parse(match.Groups["end"].Value))).ToArray();
+
+static async Task CheckEditBeginAsync()
+{
+    var bytes = Encoding.UTF8.GetBytes("# Title\r\n\r\nBody — ünïcödé 🙂 text.\r\n");
+    await using var fixture = await ToggleFixture.CreateAsync(bytes);
+    Ensure(fixture.Html.Contains($"window.mdviewEdit={{hash:\"{Sha256Hex(bytes)}\"}};", StringComparison.Ordinal),
+        "The page did not carry the hash of the bytes it was rendered from.");
+    var (status, body) = await fixture.EditAsync("source", new { });
+    EnsureStatus(status, HttpStatusCode.OK);
+    Ensure(body!.RootElement.GetProperty("text").GetString() == Encoding.UTF8.GetString(bytes), "Edit source was not the file's exact text.");
+    Ensure(body.RootElement.GetProperty("hash").GetString() == Sha256Hex(bytes), "Edit source hash did not match the file.");
+    Ensure(body.RootElement.GetProperty("newline").GetString() == "\r\n", "A CRLF file was not reported as CRLF.");
+    var text = body.RootElement.GetProperty("text").GetString()!;
+    var ranges = Ranges(body.RootElement.GetProperty("html").GetString()!);
+    Ensure(ranges.Length == 2 && text[ranges[0].Start..ranges[0].End] == "# Title" &&
+        text[ranges[1].Start..ranges[1].End] == "Body — ünïcödé 🙂 text.",
+        "Edit ranges did not index the returned text (UTF-16 offsets across non-ASCII and a surrogate pair).");
+}
+
+static async Task CheckEditSavePreservationAsync()
+{
+    // BOM, CRLF, a trailing-space hard break and a tab-indented block around the edited paragraph.
+    var bom = Encoding.UTF8.GetPreamble();
+    var original = "# Keep  \r\n\r\nEdit me.\r\n\r\n\tcode\tkept   \r\nno final newline";
+    await using var fixture = await ToggleFixture.CreateAsync([.. bom, .. Encoding.UTF8.GetBytes(original)]);
+    var (_, begin) = await fixture.EditAsync("source", new { });
+    var text = begin!.RootElement.GetProperty("text").GetString()!;
+    var hash = begin.RootElement.GetProperty("hash").GetString();
+    var paragraph = Ranges(begin.RootElement.GetProperty("html").GetString()!)
+        .Single(range => text[range.Start..range.End] == "Edit me.");
+    // What edit.js sends: the textarea's LF text converted to the file's CRLF, spliced in.
+    var edited = text[..paragraph.Start] + "Edited,\r\nacross two lines." + text[paragraph.End..];
+    var (status, saved) = await fixture.EditAsync("save", new { text = edited, hash, force = false });
+    EnsureStatus(status, HttpStatusCode.OK);
+    var after = File.ReadAllBytes(fixture.Path);
+    var expected = (byte[])[.. bom, .. Encoding.UTF8.GetBytes(original.Replace("Edit me.", "Edited,\r\nacross two lines."))];
+    Ensure(after.AsSpan().SequenceEqual(expected), "Saved bytes differed from the original outside the edited block.");
+    EnsureLineEndings(after, expectedCrlf: 6, expectedBareLf: 0);
+    Ensure(saved!.RootElement.GetProperty("hash").GetString() == Sha256Hex(after), "Save returned a hash that is not the file's.");
+
+    // A second save chains from the hash the first one returned.
+    var (again, _) = await fixture.EditAsync("save", new { text = edited + "\r\n", hash = saved.RootElement.GetProperty("hash").GetString(), force = false });
+    EnsureStatus(again, HttpStatusCode.OK);
+}
+
+static async Task CheckEditConflictAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("original\n");
+    var (_, begin) = await fixture.EditAsync("source", new { });
+    var hash = begin!.RootElement.GetProperty("hash").GetString();
+    await File.WriteAllTextAsync(fixture.Path, "changed by another program\n", new UTF8Encoding(false));
+    var (status, _) = await fixture.EditAsync("save", new { text = "mine\n", hash, force = false });
+    EnsureStatus(status, HttpStatusCode.Conflict);
+    EnsureBytes(fixture.Path, "changed by another program\n");
+    (status, _) = await fixture.EditAsync("save", new { text = "mine\n", hash = (string?)null, force = false });
+    EnsureStatus(status, HttpStatusCode.BadRequest);
+    EnsureBytes(fixture.Path, "changed by another program\n");
+    (status, _) = await fixture.EditAsync("save", new { text = "mine\n", hash, force = true });
+    EnsureStatus(status, HttpStatusCode.OK);
+    EnsureBytes(fixture.Path, "mine\n");
+
+    File.Delete(fixture.Path);
+    (status, _) = await fixture.EditAsync("save", new { text = "resurrected\n", hash, force = false });
+    EnsureStatus(status, HttpStatusCode.Conflict);
+    Ensure(!File.Exists(fixture.Path), "An unforced save recreated a file deleted underneath the editor.");
+}
+
+static async Task CheckEditAuthorizationAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("protected\n");
+    var (_, begin) = await fixture.EditAsync("source", new { });
+    var hash = begin!.RootElement.GetProperty("hash").GetString();
+    foreach (var route in new[] { "source", "render", "save" })
+    {
+        var body = new { text = "pwned\n", hash, force = true };
+        EnsureStatus((await fixture.EditAsync(route, body, token: null)).Status, HttpStatusCode.Forbidden);
+        EnsureStatus((await fixture.EditAsync(route, body, token: "wrong-token")).Status, HttpStatusCode.Forbidden);
+        EnsureStatus((await fixture.EditAsync(route, body, origin: null)).Status, HttpStatusCode.Forbidden);
+        EnsureStatus((await fixture.EditAsync(route, body, origin: "https://evil.example")).Status, HttpStatusCode.Forbidden);
+        EnsureStatus((await fixture.EditAsync(route, body, documentId: "not-a-registered-id")).Status, HttpStatusCode.NotFound);
+    }
+    EnsureBytes(fixture.Path, "protected\n");
+    EnsureStatus((await fixture.EditAsync("save", new { text = "allowed\n", hash, force = false })).Status, HttpStatusCode.OK);
+    EnsureBytes(fixture.Path, "allowed\n");
+}
+
+static async Task CheckEditEncodingAsync()
+{
+    byte[][] unsafeFiles =
+    [
+        [0x63, 0x61, 0x66, 0xE9, 0x0A],                                   // Windows-1252 "café"
+        [0xFF, 0xFE, .. Encoding.Unicode.GetBytes("utf-16 text\n")],      // UTF-16 LE with BOM
+    ];
+    foreach (var bytes in unsafeFiles)
+    {
+        await using var fixture = await ToggleFixture.CreateAsync(bytes);
+        EnsureStatus((await fixture.EditAsync("source", new { })).Status, HttpStatusCode.UnsupportedMediaType);
+        var (status, _) = await fixture.EditAsync("save", new { text = "replaced\n", hash = Sha256Hex(bytes), force = false });
+        EnsureStatus(status, HttpStatusCode.UnsupportedMediaType);
+        (status, _) = await fixture.EditAsync("save", new { text = "replaced\n", hash = Sha256Hex(bytes), force = true });
+        EnsureStatus(status, HttpStatusCode.UnsupportedMediaType);
+        Ensure(File.ReadAllBytes(fixture.Path).AsSpan().SequenceEqual(bytes), "A non-UTF-8 file was rewritten.");
+    }
+}
+
+static async Task CheckEditSurrogateAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("text\n");
+    var bytes = File.ReadAllBytes(fixture.Path);
+    var (status, _) = await fixture.EditRawAsync("save", $$"""{"token":{{JsonSerializer.Serialize(fixture.Token)}},"text":"bad \ud800 half","hash":"{{Sha256Hex(bytes)}}","force":false}""");
+    EnsureStatus(status, HttpStatusCode.BadRequest);
+    Ensure(File.ReadAllBytes(fixture.Path).AsSpan().SequenceEqual(bytes), "An unencodable save modified the file.");
+}
+
+static async Task CheckEditEchoAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("watched\n");
+    await using var events = await fixture.ConnectEventsAsync();
+    var (_, begin) = await fixture.EditAsync("source", new { });
+    EnsureStatus((await fixture.EditAsync("save", new { text = "saved by the editor\n", hash = begin!.RootElement.GetProperty("hash").GetString(), force = false })).Status, HttpStatusCode.OK);
+    Ensure(!await events.HasReloadAsync(TimeSpan.FromSeconds(2)), "Saving produced an echo reload event.");
+    await File.AppendAllTextAsync(fixture.Path, "external edit\n", new UTF8Encoding(false));
+    Ensure(await events.HasReloadAsync(TimeSpan.FromSeconds(8)), "An external write after a save did not produce a reload event.");
+}
+
+static async Task CheckEditRenderAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("safe\n");
+    var before = File.ReadAllBytes(fixture.Path);
+    const string hostile = "![x](missing.png){onerror=alert(1)}\n\n[a](javascript:alert(1))\n\n<img src=x onerror=alert(1)>\n\n" +
+        "<p data-md-start=\"0\" data-md-end=\"9\">forged</p>\n\n:::menu-bar\nx\n:::\n";
+    var (status, body) = await fixture.EditAsync("render", new { text = hostile });
+    EnsureStatus(status, HttpStatusCode.OK);
+    var html = body!.RootElement.GetProperty("html").GetString()!;
+    var tags = GetOpeningTags(html);
+    Ensure(!tags.Any(tag => Regex.IsMatch(tag, @"\son[a-z]+\s*=", RegexOptions.IgnoreCase)), "Rendered edit text carried an event handler.");
+    Ensure(!tags.Any(tag => Regex.IsMatch(tag, @"(?:href|src)\s*=\s*[""']?javascript:", RegexOptions.IgnoreCase)), "Rendered edit text carried a javascript: URI.");
+    Ensure(Ranges(html).Length == 5, "Document text forged or suppressed an edit range.");
+    Ensure(File.ReadAllBytes(fixture.Path).AsSpan().SequenceEqual(before), "Rendering unsaved text wrote to the file.");
+}
+
+static async Task CheckEditAfterToggleAsync()
+{
+    // A checkbox toggle rewrites the file without reloading the page, so the page's hash is
+    // stale. Entering edit mode must hand back the new text and hash, or the first save 409s.
+    await using var fixture = await ToggleFixture.CreateAsync("- [ ] task\n\nafter\n");
+    EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.NoContent);
+    var (_, begin) = await fixture.EditAsync("source", new { });
+    Ensure(begin!.RootElement.GetProperty("text").GetString() == "- [x] task\n\nafter\n", "Edit mode began from pre-toggle text.");
+    Ensure(!fixture.Html.Contains(begin.RootElement.GetProperty("hash").GetString()!, StringComparison.Ordinal),
+        "The page's hash was not stale after a toggle; this check is vacuous.");
+    EnsureStatus((await fixture.EditAsync("save", new { text = "- [x] task\n\nafter, edited\n", hash = begin.RootElement.GetProperty("hash").GetString(), force = false })).Status,
+        HttpStatusCode.OK);
+    EnsureBytes(fixture.Path, "- [x] task\n\nafter, edited\n");
 }
 
 static async Task CheckFileCommandAllowlistAsync()
@@ -1018,6 +1199,28 @@ sealed class ToggleFixture : IAsyncDisposable
             documentId = body.RootElement.TryGetProperty("id", out var id) ? id.GetString() : null;
         }
         return new CommandResponse(response.StatusCode, documentId);
+    }
+
+    internal Task<(HttpStatusCode Status, JsonDocument? Body)> EditAsync(string route, object body,
+        string? token = "__fixture_token__", string? origin = "__fixture_origin__", string? documentId = null)
+    {
+        var fields = JsonSerializer.SerializeToNode(body)!.AsObject();
+        fields["token"] = token == "__fixture_token__" ? Token : token;
+        return EditRawAsync(route, fields.ToJsonString(), origin, documentId);
+    }
+
+    internal async Task<(HttpStatusCode Status, JsonDocument? Body)> EditRawAsync(string route, string json,
+        string? origin = "__fixture_origin__", string? documentId = null)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{server.Port}/{route}/{documentId ?? Id}");
+        if (origin is not null)
+            request.Headers.Add("Origin", origin == "__fixture_origin__" ? $"http://127.0.0.1:{server.Port}" : origin);
+        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        using var response = await client.SendAsync(request);
+        var body = response.Content.Headers.ContentType?.MediaType == "application/json"
+            ? JsonDocument.Parse(await response.Content.ReadAsStringAsync())
+            : null;
+        return (response.StatusCode, body);
     }
 
     internal async Task<EventStream> ConnectEventsAsync()

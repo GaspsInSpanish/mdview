@@ -15,7 +15,8 @@ Claude-artifact-style typography and opens it in a **chromeless Brave window**
 (`--app=`), live-reloading when the file changes on disk. Distributed as an installer
 from GitHub Releases.
 
-It is a *reading* tool. It does not edit, and it has no UI chrome of its own.
+It is a *reading* tool first. Every page loads locked; editing happens only after the
+user unlocks it (`projectoutline.md` §7, "Edit mode").
 
 ## Runtime & build
 
@@ -96,6 +97,13 @@ It is a *reading* tool. It does not edit, and it has no UI chrome of its own.
   - When scanning rendered HTML in a test, parse it structurally. The page embeds
     highlight.js, whose source contains literal `<script`/`<style>` patterns; naive
     regex scans have produced false results twice.
+- **Edits splice source; they never convert HTML back to Markdown.** Edit mode
+  replaces the source range stamped on a block with text the user typed. Every byte
+  outside touched blocks, the BOM and each untouched line ending must survive a save
+  byte-for-byte. Every write endpoint checks `Origin` *and* the write token, and a save
+  must match the hash of the version editing began from (409 otherwise). The
+  `data-md-start`/`-end` stamp is added after sanitizing and must never be put on the
+  sanitizer allowlist: a forged range would write to the wrong bytes of the user's file.
 - No hardcoded path separators or literal `~`. Build paths with `Path.Combine` and
   `Environment.GetFolderPath`.
 

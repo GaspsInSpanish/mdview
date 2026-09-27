@@ -150,3 +150,26 @@ come back **fully expanded**, and this file's bytes should be unchanged.
 
 - [ ] This checkbox *does* write to the file when you click it
 - [x] That write path is unrelated to folding and is covered by `--toggle`
+
+## 7. Edit mode — the parts only a real window can prove
+
+The edit flow itself is driven end to end in headless Brave (`browser-edit-flow`,
+40 checks at three widths) and the save path against the real server
+(`ServeProbe --edit`). What those cannot reach is **real input in a real `--app`
+window**: they dispatch synthetic events. **Use a copy of a file for this, not
+this one.**
+
+1. **Ctrl+E** flips the lock button (top right) between *Locked* and *Editing*,
+   and **Ctrl+S** saves. Brave must not grab either: no address-bar search, no
+   "Save page as" dialog.
+2. Click a paragraph: its Markdown appears in place, caret roughly where you
+   clicked. Type, including an **Alt+0151** em dash. The menu bar must not
+   steal focus when you press Alt.
+3. The window title gains a leading `*` and the lock shows a dot while unsaved.
+   Close the window with unsaved edits: Brave should ask before leaving.
+4. **Conflict:** unlock and edit in mdview without saving, change and save the
+   same file in Notepad, then press Ctrl+S in mdview. You should be asked
+   whether to overwrite. Cancel keeps your edits; the lock reads
+   *Editing (changed on disk)*.
+5. **Byte preservation:** edit one paragraph of a CRLF file under git and save.
+   `git diff` should show only that paragraph.
