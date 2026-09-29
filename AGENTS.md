@@ -11,7 +11,7 @@ restate it here.
 ## What this product is
 
 A Windows desktop utility. Double-clicking a `.md` file renders it with
-Claude-artifact-style typography and opens it in a **chromeless Brave window**
+Claude-artifact-style typography and opens it in a **chromeless Chromium app window** (Brave, else Chrome, else Edge)
 (`--app=`), live-reloading when the file changes on disk. Distributed as an installer
 from GitHub Releases.
 
@@ -37,7 +37,7 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
 - **The only NuGet dependency is `Markdig`.** Everything else comes from the BCL:
   `HttpListener` for the server, `FileSystemWatcher` for change detection, `Mutex` for
   single-instance, `Microsoft.Win32.Registry` (built into `net8.0-windows`) for
-  locating Brave.
+  locating the browser.
 - **Do not add a NuGet or CDN dependency inside a worker sandbox** — it has no
   registry or network access and the restore will fail. Report it via Blocker and let
   the PM add it first (Standard §14).
@@ -56,7 +56,7 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
   Never take a filesystem path from the query string and read it — that is a path
   traversal hole.
 - **Never leave an orphaned process.** The server exits when its last reader window
-  disconnects. A user who closes every Brave window must not have a `mdview.exe`
+  disconnects. A user who closes every reader window must not have a `mdview.exe`
   lingering in Task Manager.
 - Markdown rendering is **untrusted input.** *(Rule rewritten 2026-09-16 after
   `S6-XSS`; the previous wording asserted `DisableHtml()` was sufficient and was
@@ -115,7 +115,7 @@ The real constraint: **a win-x64 exe cannot be executed in this WSL environment.
 Never report "tested and working" on the basis of a build alone. For logic that can be
 exercised without Windows (markdown → HTML, the Claude CSS, document-id mapping, path
 handling), factor it so it can be checked by rendering to a file and inspecting the
-output. For anything genuinely Windows-only — Brave discovery, registry reads, file
+output. For anything genuinely Windows-only — browser discovery, registry reads, file
 association, the installer — state plainly in your report that it is **unverified,
 pending a Windows run**, and say exactly what the user should click to verify it.
 

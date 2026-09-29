@@ -11,6 +11,7 @@
     <Compile Include="../../src/MdView/Rendering/**/*.cs" Link="Rendering/%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="../../src/MdView/Serving/**/*.cs" Link="Serving/%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="../../src/MdView/App/IBrowserLauncher.cs" Link="App/IBrowserLauncher.cs" />
+    <Compile Include="../../src/MdView/App/BrowserDiscovery.cs" Link="App/BrowserDiscovery.cs" />
     <Compile Include="../../src/MdView/App/InstanceCoordinator.cs" Link="App/InstanceCoordinator.cs" />
     <Compile Include="../../src/MdView/App/Lifecycle.cs" Link="App/Lifecycle.cs" />
     <EmbeddedResource Include="../../src/MdView/Assets/**/*" Link="Assets/%(RecursiveDir)%(Filename)%(Extension)" />

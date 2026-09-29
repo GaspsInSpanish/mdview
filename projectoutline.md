@@ -67,7 +67,7 @@ mdview.exe  --- Mutex "Local\mdview-singleton" already held? ---+
 | `ReaderServer` | `HttpListener` on loopback. Routes `/d/{id}`, `/events/{id}`, `POST /open`, and the token-gated writes `/toggle`, `/theme`, `/command/{id}`, `/source/{id}`, `/render/{id}`, `/save/{id}` |
 | `DocumentEditService` | Edit mode's write path: decode (UTF-8 only is editable), hash-checked save, BOM restore, atomic replace |
 | `FileWatcher` | `FileSystemWatcher` per open doc, debounced, pushes reload over SSE |
-| `BraveLauncher` | Locates `brave.exe`, launches `--app=` |
+| `BrowserLauncher` | Picks Brave → Chrome → Edge (`BrowserDiscovery`, pure and probe-tested), launches `--app=`; default browser as last resort |
 | `InstanceCoordinator` | Named mutex, handshake file, hand-off to the running instance |
 | `Lifecycle` | Ref-counts SSE clients; shuts the process down when the last reader closes |
 
@@ -172,6 +172,8 @@ association, single-instance forwarding, and uninstall cleanliness.
 | 2026-09-15 | Installer built by GitHub Actions on `windows-latest` | Inno Setup is Windows-only; also sidesteps cross-building from WSL |
 | 2026-09-16 | Checkboxes become clickable and **write back to the file**, reversing "no editing" | A visual-only toggle was rejected as dishonest: the file would still say `[ ]` and the next live-reload would silently revert every tick. Between "not interactive" and "interactive and truthful", the user chose truthful. Scope is deliberately drawn at *toggling an existing checkbox* so this doesn't become a wedge for general editing. Consequence accepted: the threat model changes from read-only to read-write, mitigated by a write token + `Origin` check (§7) |
 | 2026-09-27 | **Edit mode behind a lock**, reversing "no general editing" (owner request) | The owner chose "type in the rendered view" over a raw-source editor, then, shown the two ways to build that, chose **reveal-source-in-place** over true WYSIWYG. WYSIWYG would convert edited HTML back into Markdown, reformatting each touched block (`*a*` → `_a_`, joined lines) and needing a new dependency. Revealing the clicked block's own source keeps the file byte-exact outside what was typed, and works for every block kind, tables and code included. Explicit Ctrl+S over autosave (owner choice). Locked by default so reading is unchanged. Threat model unchanged in kind (already read-write since v1.1); the new endpoints sit behind the same token + `Origin` gate. |
+| 2026-09-28 | Browser fallback **Brave → Chrome → Edge → default browser** (owner request) | Previously anything but Brave got a plain browser tab. All three are Chromium and take `--app=`. Each browser is searched completely (App Paths, then every install root) before the next, so a per-user Brave still beats a system Chrome. Since Edge ships with Windows 10/11, the default-browser path is now practically unreachable. Config gains `browserPath`; `bravePath` still works. |
+| 2026-09-28 | **v2 becomes a native Windows app with an embedded WebView2**, reversing "Brave `--app=` over embedded WebView2" (2026-09-15); full Win98 frame, title bar included (owner decisions) | Fully native rendering was rejected as a rewrite of every page-layer feature and probe for worse typography. WebView2 keeps the page layer and its tests, and deletes the loopback server and its security surface. The owner chose the custom Win98 title bar over keeping Windows' own frame, accepting the loss of the snap-layout flyout and taking on drag/resize/maximize/DPI verification. Plan in §5b. |
 | 2026-09-15 | v1 ships `.md` only; more formats post-v1 | User decision. A `DocumentKind` seam goes in at S2 so later formats are an addition, not a refactor of the registry/server/installer together |
 
 ---
@@ -282,6 +284,54 @@ Theme (System, Light, Dark).
   an HTML export. Toggled checkboxes are already persisted, so a copy captures them.
 - **Find must be implemented in-page.** A page cannot open Brave's native find bar
   programmatically.
+
+## 5b. v2 — Native Windows app (planned 2026-09-28)
+
+**Goal (owner):** mdview stops opening a browser and becomes its own Windows
+application, with the Win98 look extended to the **whole window, title bar included**.
+
+**Route: own window + embedded WebView2.** A native top-level window hosts Microsoft's
+WebView2 control (the Edge engine as a component, shipped with Windows 11). Chosen over
+fully native rendering, which would rewrite the renderer, edit mode, Find, folding,
+highlighting and every probe for worse typography. Everything in the page layer (HTML,
+CSS, `page.js`/`menu.js`/`fold.js`/`edit.js`, sanitizer, CSP) carries over, and so do
+`RenderProbe` and `GeometryProbe`, which already test it in the same Chromium engine.
+
+**What gets deleted.** The loopback `HttpListener`, port fallback, write token,
+`Origin` checks, SSE, the handshake file, and the grace-period shutdown. The page talks
+to the host over WebView2's message channel, and pages are served from memory, so no
+socket exists for another local process to reach. The untrusted-input rules in
+`AGENTS.md` still apply in full: the document still renders as HTML.
+
+**The Win98 frame.** The window keeps a resizable native border but has no Windows
+caption. The title bar is drawn **in the page**, like the menu bar already is: navy
+gradient, beveled `_ □ X` buttons, the file name. Dragging it moves the window through
+WebView2's non-client-region support (CSS `app-region: drag`), so the system still
+handles move, double-click-to-maximize and Aero Snap drags. The buttons send
+minimize/maximize/close messages to the host. Consequences, accepted by the owner in
+choosing this: Windows 11's snap-layout flyout on the maximize button is lost, and
+drag, resize, maximize and DPI behaviour become ours to verify. Upside: the title bar's
+geometry is probe-testable in headless Brave like the menu bar.
+
+**Dependency.** Adds the `Microsoft.Web.WebView2` NuGet, which changes the
+one-dependency rule; the PM adds it outside worker sandboxes (Standard §14). WinForms
+stays out unless W0 shows hosting in a bare Win32 window is impractical (measured
+before: WinForms costs +34.8 MB).
+
+**Packets:**
+
+| # | Scope | Risk | WSL-verifiable? |
+|---|---|---|---|
+| W0 | Spike. Measure: exe/installer size with WebView2; hosting WebView2 in a P/Invoke Win32 window without WinForms; cross-building from WSL; non-client region support (`app-region: drag`) and the SDK version it needs; runtime present on the owner's and the test friend's PCs. Go/no-go per item | Low | Partly |
+| W1 | Own window. Replace the browser launch with an mdview window hosting WebView2, still pointed at today's loopback server. Nothing else moves, so every probe stays valid | Medium | Build only |
+| W2 | Drop the server. Serve pages from memory, turn `/toggle` `/theme` `/command` `/source` `/render` `/save` into host messages, push reload and theme events directly. Delete the HTTP, token, `Origin` and SSE code. Keep sanitizer and CSP | **High** | Page side yes, host side no |
+| W3 | Desktop lifecycle. One process, a window per file; a second launch hands its path over a named pipe; exit when the last window closes. Remember window size and position; drag a `.md` onto a window to open it | **High** | No |
+| W4 | Win98 frame. Borderless-with-resize window, in-page title bar with drag region and caption buttons, maximize/restore state, active/inactive title colours, DPI | **High** | Title-bar geometry yes (`GeometryProbe`), window behaviour no |
+| W5 | Installer. Detect the WebView2 runtime and bootstrap it if missing; put the WebView2 profile in `%LOCALAPPDATA%\mdview`; retire `browserPath`/`bravePath` | Medium | CI only |
+
+Each packet ships as its own release, so a regression is always one step back.
+Everything in the "No" column gets a precise click-list for the owner, per
+`docs/MANUAL_REVIEW.md`.
 
 ## 6. Roadmap — post-v1
 

@@ -34,7 +34,7 @@ internal static class Program
             var document = server.RegisterDocument(path);
             coordinator.WriteHandshake(server.Port);
 
-            IBrowserLauncher browserLauncher = new BraveLauncher();
+            IBrowserLauncher browserLauncher = new BrowserLauncher();
             using var lifecycle = new Lifecycle(server, coordinator, browserLauncher, reportMessage: ShowWarning);
             Console.CancelKeyPress += (_, eventArgs) =>
             {

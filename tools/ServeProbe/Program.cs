@@ -33,6 +33,11 @@ if (args.Length == 1 && args[0] == "--files")
     return await RunFileChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--browser")
+{
+    return await RunBrowserChecksAsync();
+}
+
 if (args.Length == 1 && args[0] == "--edit")
 {
     return await RunEditChecksAsync();
@@ -40,7 +45,7 @@ if (args.Length == 1 && args[0] == "--edit")
 
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit | ServeProbe --browser");
     return 1;
 }
 
@@ -110,6 +115,77 @@ static async Task<int> RunFileChecksAsync()
     failed |= !await RunCheckAsync("files-new-and-cancel", CheckNewAndCancelAsync);
     failed |= !await RunCheckAsync("files-modal-lifecycle-hold", CheckModalLifecycleHoldAsync);
     return failed ? 1 : 0;
+}
+
+static async Task<int> RunBrowserChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("browser-order-brave-chrome-edge", CheckBrowserOrderAsync);
+    failed |= !await RunCheckAsync("browser-full-search-before-next", CheckBrowserFullSearchAsync);
+    failed |= !await RunCheckAsync("browser-stale-registration-skipped", CheckBrowserStaleRegistrationAsync);
+    failed |= !await RunCheckAsync("browser-configured-path", CheckConfiguredBrowserAsync);
+    return failed ? 1 : 0;
+}
+
+static string[] ProbeRoots() => [@"C:\Program Files", @"C:\Program Files (x86)", @"C:\Users\u\AppData\Local"];
+
+static string Installed(string root, string browser) => browser switch
+{
+    "Brave" => Path.Combine(root, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+    "Chrome" => Path.Combine(root, "Google", "Chrome", "Application", "chrome.exe"),
+    _ => Path.Combine(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+};
+
+static BrowserMatch? FindWith(IEnumerable<string> files, IDictionary<string, string>? registered = null)
+{
+    var present = new HashSet<string>(files);
+    return BrowserDiscovery.Find(name => registered?.TryGetValue(name, out var path) == true ? path : null,
+        present.Contains, ProbeRoots());
+}
+
+static Task CheckBrowserOrderAsync()
+{
+    string[] all = [Installed(ProbeRoots()[0], "Brave"), Installed(ProbeRoots()[0], "Chrome"), Installed(ProbeRoots()[1], "Edge")];
+    Ensure(FindWith(all)?.Name == "Brave", "Brave was not preferred when all three are installed.");
+    Ensure(FindWith(all[1..])?.Name == "Chrome", "Chrome was not chosen without Brave.");
+    Ensure(FindWith(all[2..]) is { Name: "Edge" } edge && edge.Path == all[2], "Edge was not chosen without Brave and Chrome.");
+    Ensure(FindWith([]) is null, "A browser was reported when none is installed.");
+    return Task.CompletedTask;
+}
+
+static Task CheckBrowserFullSearchAsync()
+{
+    // A per-user Brave (Local AppData, searched last) must still beat a system-wide Chrome.
+    var userBrave = Installed(ProbeRoots()[2], "Brave");
+    Ensure(FindWith([Installed(ProbeRoots()[0], "Chrome"), userBrave])?.Path == userBrave,
+        "A system Chrome beat a per-user Brave: browsers are not searched one at a time.");
+    // The App Paths registration wins over folder guessing for the same browser.
+    Ensure(FindWith([@"D:\Portable\chrome.exe", Installed(ProbeRoots()[0], "Chrome")],
+        new Dictionary<string, string> { ["chrome.exe"] = @"D:\Portable\chrome.exe" })?.Path == @"D:\Portable\chrome.exe",
+        "A registered browser path was not preferred over the default install folder.");
+    return Task.CompletedTask;
+}
+
+static Task CheckBrowserStaleRegistrationAsync()
+{
+    // An uninstalled Brave can leave its registration behind; fall through to Chrome.
+    var chrome = Installed(ProbeRoots()[0], "Chrome");
+    Ensure(FindWith([chrome], new Dictionary<string, string> { ["brave.exe"] = @"C:\Gone\brave.exe" })?.Path == chrome,
+        "A registration pointing at a missing file stopped the search.");
+    return Task.CompletedTask;
+}
+
+static Task CheckConfiguredBrowserAsync()
+{
+    Ensure(BrowserDiscovery.ConfiguredPath("""{"browserPath":"C:\\Edge\\msedge.exe"}""") == @"C:\Edge\msedge.exe", "browserPath was not read.");
+    Ensure(BrowserDiscovery.ConfiguredPath("""{"bravePath":"C:\\Old\\brave.exe"}""") == @"C:\Old\brave.exe", "The older bravePath setting stopped working.");
+    Ensure(BrowserDiscovery.ConfiguredPath("""{"bravePath":"C:\\b.exe","browserPath":"C:\\a.exe"}""") == @"C:\a.exe", "browserPath did not take precedence over bravePath.");
+    Ensure(BrowserDiscovery.ConfiguredPath("""{"theme":"dark","browserPath":"  "}""") is null, "A blank or absent setting was treated as a browser choice.");
+    Ensure(BrowserDiscovery.ConfiguredPath("[]") is null, "A non-object config was treated as a browser choice.");
+    var threw = false;
+    try { BrowserDiscovery.ConfiguredPath("{not json"); } catch (JsonException) { threw = true; }
+    Ensure(threw, "Malformed config did not raise JsonException, which the launcher relies on to ignore it.");
+    return Task.CompletedTask;
 }
 
 static async Task<int> RunEditChecksAsync()
