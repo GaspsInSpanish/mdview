@@ -29,7 +29,9 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
 - No system-wide `dotnet` here — the SDK is at `~/.dotnet`. Run
   `export PATH="$HOME/.dotnet:$PATH"` first if `dotnet` isn't found.
 - Development happens in WSL; the target is Windows. `dotnet build`/`publish` for
-  `win-x64` cross-compile fine from WSL, but **the produced .exe cannot be run here.**
+  `win-x64` cross-compile fine from WSL. From the PM's shell the produced .exe *does*
+  run, on the owner's Windows desktop, through WSL interop. A worker sandbox has not
+  been shown to; treat it as unable.
   See "Validation" below.
 
 ## Dependencies
@@ -111,7 +113,18 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
 
 `dotnet build -c Release` must produce **zero warnings, zero errors**.
 
-The real constraint: **a win-x64 exe cannot be executed in this WSL environment.**
+*(Corrected 2026-09-28, `W0-SPIKE`. This section used to say a win-x64 exe "cannot
+be executed in this WSL environment". Measured: it can, from the PM's shell, through
+WSL interop. It runs on the owner's real desktop as the owner's Windows user, and a
+GUI exe hosting WebView2 ran its own checks and exited cleanly.)* The real constraints:
+- **Only the PM's shell is known to run it.** A worker sandbox has not been shown to:
+  a worker reports runtime behaviour as unverified, and the PM runs it.
+- **It runs on the owner's live desktop.** Windows are visible, and a launched process
+  cannot take the foreground (Windows' focus-stealing rule), so other apps may cover it.
+  A check must not depend on z-order or focus, and must never send mouse or keyboard
+  input unless it first proves the target under the cursor is its own window.
+- **Real user input still needs a human**: typing, dragging, snapping, resizing by hand.
+
 Never report "tested and working" on the basis of a build alone. For logic that can be
 exercised without Windows (markdown → HTML, the Claude CSS, document-id mapping, path
 handling), factor it so it can be checked by rendering to a file and inspecting the

@@ -310,7 +310,9 @@ WebView2's non-client-region support (CSS `app-region: drag`), so the system sti
 handles move, double-click-to-maximize and Aero Snap drags. The buttons send
 minimize/maximize/close messages to the host. Consequences, accepted by the owner in
 choosing this: Windows 11's snap-layout flyout on the maximize button is lost, and
-drag, resize, maximize and DPI behaviour become ours to verify. Upside: the title bar's
+drag, resize, maximize and DPI behaviour become ours to verify. *(Measured 2026-09-28:
+the owner's PC is **Windows 10** 19045, which has no snap-layout flyout, so the loss
+applies only to Windows 11 users. WebView2 runtime 153 is present there.)* Upside: the title bar's
 geometry is probe-testable in headless Brave like the menu bar.
 
 **Dependency.** Adds the `Microsoft.Web.WebView2` NuGet, which changes the
@@ -328,6 +330,23 @@ before: WinForms costs +34.8 MB).
 | W3 | Desktop lifecycle. One process, a window per file; a second launch hands its path over a named pipe; exit when the last window closes. Remember window size and position; drag a `.md` onto a window to open it | **High** | No |
 | W4 | Win98 frame. Borderless-with-resize window, in-page title bar with drag region and caption buttons, maximize/restore state, active/inactive title colours, DPI | **High** | Title-bar geometry yes (`GeometryProbe`), window behaviour no |
 | W5 | Installer. Detect the WebView2 runtime and bootstrap it if missing; put the WebView2 profile in `%LOCALAPPDATA%\mdview`; retire `browserPath`/`bravePath` | Medium | CI only |
+
+**W0 results (2026-09-28, run on the owner's Windows 10 desktop; `tools/W0Spike`).**
+
+| Question | Answer | Evidence |
+|---|---|---|
+| WebView2 in a raw Win32 window, no WinForms/WPF? | **Yes** | Controller created on a P/Invoke HWND; 13/13 `--auto` checks |
+| Size cost | **~1 MB, not +35 MB** | Spike single-file exe 35.44 MB vs mdview 35.40 MB (spike lacks Markdig and app code) |
+| Build from WSL, zero warnings | **Yes, with care** | The package's own targets pull in the WPF wrapper (warning MSB3277). Fix: `ExcludeAssets="compile;build;buildTransitive"` plus a direct reference to `Microsoft.Web.WebView2.Core` and `WebView2Loader.dll` as content |
+| Serve from memory, CSP intact | **Yes** | `WebResourceRequested` on `https://mdview.example/`; nonce script ran, inline `onerror` blocked |
+| Page ↔ host messaging | **Yes, 11–14 ms** round trip | `postMessage` / `PostWebMessageAsJson` |
+| Startup | **0.7–1.5 s** to first render | |
+| Drag region (`app-region: drag`) | **Yes** | Setting accepted, style computes `drag`, and the owner verified by hand on 2026-10-02: drag moves the window, double-click maximizes/restores, edge-drag snaps, all edges and corners resize, `_ □ X` work. (Synthetic drag can't run here: a process started from WSL can't take the foreground.) |
+| Resize with no caption | **Yes, but it shapes W4** | Removing the caption also removes Windows' sizing border, and the WebView2 child swallows edge hits. Working technique: a band around the client area left uncovered by WebView2, with the parent answering `WM_NCHITTEST`. All 8 edges/corners verified, and mutation-tested (child covering the band fails the check). The band is 16 px at 96 DPI and unpainted, including a 16 px strip above the title bar; W4 must paint it as the Win98 window border and settle its width |
+| Clean exit | **Yes** | WebView2 profile deleted only after `BrowserProcessExited`; nothing lingering |
+| Runtime on target | Owner's PC: **153** on Win10 19045. Friend's PC: unknown, so W5's installer check stays | |
+
+**Go** for W1. Every question answered yes on the owner's machine.
 
 Each packet ships as its own release, so a regression is always one step back.
 Everything in the "No" column gets a precise click-list for the owner, per

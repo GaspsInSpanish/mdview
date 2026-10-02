@@ -31,8 +31,10 @@ Packets are not persisted individually. The durable record is one row in
 
 ## Validation
 <the exact commands to run and what a pass looks like — see AGENTS.md "Validation".
-A win-x64 exe cannot run in WSL: name what is checkable here (build, rendered-HTML
-inspection) AND what must be explicitly reported as unverified-pending-Windows.>
+A worker cannot run the win-x64 exe; the PM can, on the owner's desktop via WSL
+interop (see AGENTS.md "Validation"). Name what the worker can check (build,
+rendered-HTML inspection), what the PM will run, and what only the owner's hands can
+verify (real typing, dragging, resizing).>
 
 ## Risk
 Low | Medium | High  — <one line of justification; drives review depth per Standard §6>
