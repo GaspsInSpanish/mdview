@@ -20,6 +20,7 @@ internal static class Program
             using var coordinator = new InstanceCoordinator();
             if (!coordinator.IsPrimary)
             {
+                _ = AllowSetForegroundWindow(unchecked((uint)-1));
                 if (await coordinator.TryForwardAsync(path, TimeSpan.FromSeconds(3)).ConfigureAwait(false))
                 {
                     return 0;
@@ -34,7 +35,7 @@ internal static class Program
             var document = server.RegisterDocument(path);
             coordinator.WriteHandshake(server.Port);
 
-            IBrowserLauncher browserLauncher = new BrowserLauncher();
+            IBrowserLauncher browserLauncher = new WebViewWindowLauncher(new BrowserLauncher(), ShowWarning);
             using var lifecycle = new Lifecycle(server, coordinator, browserLauncher, reportMessage: ShowWarning);
             Console.CancelKeyPress += (_, eventArgs) =>
             {
@@ -91,4 +92,8 @@ internal static class Program
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "MessageBoxW")]
     private static extern int MessageBox(IntPtr window, string text, string caption, uint type);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AllowSetForegroundWindow(uint processId);
 }

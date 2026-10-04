@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using MdView.Serving;
@@ -78,7 +77,7 @@ public sealed class NativeFileDialogProvider : IFileDialogProvider
             if (!string.IsNullOrWhiteSpace(suggestedFileName)) dialog.SetFileName(suggestedFileName);
             SetInitialFolder(dialog, initialDirectory);
 
-            var owner = FindBraveForegroundWindow();
+            var owner = FindMdViewForegroundWindow();
             using var foreground = owner == IntPtr.Zero ? BeginForegroundAssist() : null;
             var result = dialog.Show(owner);
             if (result == CancelledHResult) return null;
@@ -104,18 +103,12 @@ public sealed class NativeFileDialogProvider : IFileDialogProvider
         finally { Marshal.ReleaseComObject(folder); }
     }
 
-    private static IntPtr FindBraveForegroundWindow()
+    private static IntPtr FindMdViewForegroundWindow()
     {
         var window = GetForegroundWindow();
         if (window == IntPtr.Zero) return IntPtr.Zero;
         _ = GetWindowThreadProcessId(window, out var processId);
-        try
-        {
-            using var process = Process.GetProcessById((int)processId);
-            return process.ProcessName.StartsWith("brave", StringComparison.OrdinalIgnoreCase) ? window : IntPtr.Zero;
-        }
-        catch (ArgumentException) { return IntPtr.Zero; }
-        catch (InvalidOperationException) { return IntPtr.Zero; }
+        return processId == Environment.ProcessId ? window : IntPtr.Zero;
     }
 
     private static IDisposable BeginForegroundAssist()

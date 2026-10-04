@@ -39,7 +39,7 @@ public sealed class Lifecycle : IDisposable
         server.DocumentOpened += OnDocumentOpened;
         server.ModalCommandStarted += OnModalCommandStarted;
         server.ModalCommandCompleted += OnModalCommandCompleted;
-        server.ExitRequested += Shutdown;
+        server.ExitRequested += OnExitRequested;
         ArmStartupGuard();
     }
 
@@ -82,7 +82,7 @@ public sealed class Lifecycle : IDisposable
         server.DocumentOpened -= OnDocumentOpened;
         server.ModalCommandStarted -= OnModalCommandStarted;
         server.ModalCommandCompleted -= OnModalCommandCompleted;
-        server.ExitRequested -= Shutdown;
+        server.ExitRequested -= OnExitRequested;
         coordinator.DeleteHandshake();
         server.Dispose();
         coordinator.Dispose();
@@ -91,6 +91,8 @@ public sealed class Lifecycle : IDisposable
 
     private string DocumentUrl(RegisteredDocument document) =>
         $"http://127.0.0.1:{server.Port}/d/{Uri.EscapeDataString(document.Id)}";
+
+    private void OnExitRequested() => browserLauncher.RequestExit(Shutdown);
 
     private void OnDocumentOpened(RegisteredDocument document)
     {

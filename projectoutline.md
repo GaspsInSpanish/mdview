@@ -67,7 +67,8 @@ mdview.exe  --- Mutex "Local\mdview-singleton" already held? ---+
 | `ReaderServer` | `HttpListener` on loopback. Routes `/d/{id}`, `/events/{id}`, `POST /open`, and the token-gated writes `/toggle`, `/theme`, `/command/{id}`, `/source/{id}`, `/render/{id}`, `/save/{id}` |
 | `DocumentEditService` | Edit mode's write path: decode (UTF-8 only is editable), hash-checked save, BOM restore, atomic replace |
 | `FileWatcher` | `FileSystemWatcher` per open doc, debounced, pushes reload over SSE |
-| `BrowserLauncher` | Picks Brave → Chrome → Edge (`BrowserDiscovery`, pure and probe-tested), launches `--app=`; default browser as last resort |
+| `WebViewWindowLauncher` | v1.4: one background STA UI thread owning a native window per document, each hosting WebView2 on the loopback page. Handles focus, dirty-close prompts, File → Exit across windows, external links, renderer crashes |
+| `BrowserLauncher` | Fallback when WebView2 is unavailable: Brave → Chrome → Edge (`BrowserDiscovery`, pure and probe-tested) as `--app=`; default browser as last resort |
 | `InstanceCoordinator` | Named mutex, handshake file, hand-off to the running instance |
 | `Lifecycle` | Ref-counts SSE clients; shuts the process down when the last reader closes |
 
@@ -347,6 +348,13 @@ before: WinForms costs +34.8 MB).
 | Runtime on target | Owner's PC: **153** on Win10 19045. Friend's PC: unknown, so W5's installer check stays | |
 
 **Go** for W1. Every question answered yes on the owner's machine.
+
+**W1 shipped as v1.4.0 (2026-10-03).** Own window per document, WebView2 on the unchanged
+loopback server, browser launch kept only as the fallback. One interface change beyond
+the plan: `IBrowserLauncher.RequestExit` (default member), so File → Exit runs every
+window's unsaved-edits prompt instead of the process exit silently taking them. Known
+wrinkle until W2 moves exit out of the server: exiting from a window with unsaved
+edits can ask twice (once from the page, once from the window).
 
 Each packet ships as its own release, so a regression is always one step back.
 Everything in the "No" column gets a precise click-list for the owner, per

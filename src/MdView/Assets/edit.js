@@ -316,6 +316,7 @@
 
   window.mdviewEdit = {
     get active() { return active; },
+    get dirty() { return isDirty(); },
     save: () => enqueue(() => save()),
     // Before a File command that acts on the file on disk. Resolves false to cancel it.
     settle: command => enqueue(async () => {

@@ -1,8 +1,8 @@
 # mdview
 
 mdview is a small Windows utility for reading Markdown. Double-click a `.md` file and it
-opens in a clean, Claude-artifact-style window that reloads by itself whenever the file
-changes on disk. When you want to change something, unlock the page and edit it in place.
+opens in its own clean, Claude-artifact-style window that reloads by itself whenever the
+file changes on disk. When you want to change something, unlock the page and edit it in place.
 
 ## Install
 
@@ -18,19 +18,15 @@ Upgrading: close every mdview window first (and end any leftover `mdview.exe` in
 Manager), then run the new installer. Only one mdview runs at a time, so a copy that is
 still running will keep opening your files.
 
-## Browser
+## Requirements
 
-mdview shows documents in a chromeless app window of a Chromium browser it finds on your
-PC, in this order:
+mdview draws its window with Microsoft **WebView2**, which comes with Windows 11 and is
+installed on most up-to-date Windows 10 PCs. Nothing else is needed: no browser opens.
 
-1. **Brave**
-2. **Google Chrome**
-3. **Microsoft Edge** (included with Windows 10 and 11)
-
-If none is found, the document opens as an ordinary tab in your default browser, with a
-notice saying so.
-
-To pick a browser yourself, create `%APPDATA%\mdview\config.json`:
+If WebView2 is missing, mdview falls back to opening the document in a browser window
+instead, trying **Brave**, then **Google Chrome**, then **Microsoft Edge**, then your
+default browser, and tells you it did so. To choose that fallback browser yourself,
+create `%APPDATA%\mdview\config.json`:
 
 ```json
 {
@@ -38,8 +34,7 @@ To pick a browser yourself, create `%APPDATA%\mdview\config.json`:
 }
 ```
 
-Any Chromium browser works. If the path you set does not exist, mdview shows an error
-rather than quietly using a different browser. (The older `bravePath` setting still works.)
+(The older `bravePath` setting still works.)
 
 ## Reading
 
@@ -70,7 +65,8 @@ anything by accident.
 5. Press **Ctrl+E** again to lock. If you have unsaved changes, mdview asks to save first.
 
 While there are unsaved changes, the window title starts with `*` and the lock button
-shows a dot. Closing the window with unsaved changes asks before discarding them.
+shows a dot. Closing the window, or **File → Exit**, with unsaved changes asks before
+discarding them.
 
 Things that are part of the file but not visible on the page, such as YAML frontmatter,
 link definitions (`[name]: https://…`) and footnote text, show as grey source lines while
@@ -110,13 +106,14 @@ save it asks whether to overwrite the other version or keep editing without savi
 | Theme | System / Light / Dark | |
 | (lock button) | Lock / unlock editing | Ctrl+E |
 
+Links to web pages open in your default browser, never inside the mdview window.
+
 Open and Save As use the normal Windows file dialogs. Save As copies the file as it is on
 disk to a new name and switches the window to the copy, like Notepad; if you have unsaved
 edits, it offers to save them first. Press **Alt** to move to the menu bar with the
 keyboard.
 
-The menu bar is drawn in Windows 98 style because the app window has no menu bar of its
-own. It follows your theme rather than being period-accurate grey, so it doesn't glare at
+The menu bar is drawn in Windows 98 style, inside the page. It follows your theme rather than being period-accurate grey, so it doesn't glare at
 night.
 
 ## Scope

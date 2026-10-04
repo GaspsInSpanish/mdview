@@ -173,3 +173,20 @@ this one.**
    *Editing (changed on disk)*.
 5. **Byte preservation:** edit one paragraph of a CRLF file under git and save.
    `git diff` should show only that paragraph.
+
+## 8. The mdview window (v1.4) — what only hands can check
+
+The window opening, the page connecting, a second file joining the same process,
+keyboard focus landing in the page, and a clean exit are all checked automatically on
+the owner's desktop (`W1-WINDOW`). These are not:
+
+1. Without clicking into the page, press **PgDn**: the document scrolls. Alt+Tab away and
+   back, unlock (Ctrl+E), click a paragraph and type: the text appears.
+2. With unsaved edits, close the window with **X**: you are asked first, and **No**
+   keeps the window. With unsaved edits in a *second* window, use **File → Exit** in the
+   first: the second window asks too.
+3. Click a web link: it opens in your default browser, and the mdview window stays on
+   the document.
+4. Double-click a second `.md` while one is open: the new window comes to the front.
+5. Drag the window between monitors with different scaling, if you have them: it
+   resizes sensibly and the text stays sharp.

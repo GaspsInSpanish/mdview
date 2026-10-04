@@ -11,8 +11,9 @@ restate it here.
 ## What this product is
 
 A Windows desktop utility. Double-clicking a `.md` file renders it with
-Claude-artifact-style typography and opens it in a **chromeless Chromium app window** (Brave, else Chrome, else Edge)
-(`--app=`), live-reloading when the file changes on disk. Distributed as an installer
+Claude-artifact-style typography and opens it in **its own native window hosting
+WebView2** (v1.4, `W1-WINDOW`; a browser `--app=` window only as a fallback when WebView2
+is unavailable), live-reloading when the file changes on disk. Distributed as an installer
 from GitHub Releases.
 
 It is a *reading* tool first. Every page loads locked; editing happens only after the
