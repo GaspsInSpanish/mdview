@@ -64,7 +64,8 @@ mdview.exe  --- Mutex "Local\mdview-singleton" already held? ---+
 | `Renderer` | Dispatches on `DocumentKind` to a format renderer, then wraps the result in the shared HTML shell (Claude CSS + hljs). Pure; no I/O beyond reading the file |
 | `MarkdownRenderer` | The one `DocumentKind` implemented in v1: Markdig pipeline + URI sanitizer |
 | `DocumentRegistry` | Opaque id ⇄ absolute path. **The security boundary** — only registered ids are servable |
-| `ReaderServer` | `HttpListener` on loopback. Routes `/d/{id}`, `/events/{id}`, `POST /open`, and the token-gated writes `/toggle`, `/theme`, `/command/{id}`, `/source/{id}`, `/render/{id}`, `/save/{id}` |
+| `DocumentHost` | v1.4 (`W2A-HOST`): every request the page makes (`/d`, `/open`, `/toggle`, `/theme`, `/command`, `/source`, `/render`, `/save`), transport-agnostic: `HandleAsync(HostRequest) -> HostResponse`. Owns the registry, watchers, echo suppression, write token, and the origin + token checks. Raises `DocumentChanged`/`ThemeChanged` for whichever transport pushes events. Per-route body caps (`MaximumBodyBytes`: 64 MiB edit routes, 64 KiB others) |
+| `ReaderServer` | Thin loopback HTTP/SSE adapter over `DocumentHost`. Refuses unknown routes, a wrong `Origin`, and oversize declared bodies **before reading the body**; SSE for reload/theme. Goes away for pages in W2b and entirely in W3 |
 | `DocumentEditService` | Edit mode's write path: decode (UTF-8 only is editable), hash-checked save, BOM restore, atomic replace |
 | `FileWatcher` | `FileSystemWatcher` per open doc, debounced, pushes reload over SSE |
 | `WebViewWindowLauncher` | v1.4: one background STA UI thread owning a native window per document, each hosting WebView2 on the loopback page. Handles focus, dirty-close prompts, File → Exit across windows, external links, renderer crashes |
@@ -327,10 +328,11 @@ before: WinForms costs +34.8 MB).
 |---|---|---|---|
 | W0 | Spike. Measure: exe/installer size with WebView2; hosting WebView2 in a P/Invoke Win32 window without WinForms; cross-building from WSL; non-client region support (`app-region: drag`) and the SDK version it needs; runtime present on the owner's and the test friend's PCs. Go/no-go per item | Low | Partly |
 | W1 | Own window. Replace the browser launch with an mdview window hosting WebView2, still pointed at today's loopback server. Nothing else moves, so every probe stays valid | Medium | Build only |
-| W2 | Drop the server. Serve pages from memory, turn `/toggle` `/theme` `/command` `/source` `/render` `/save` into host messages, push reload and theme events directly. Delete the HTTP, token, `Origin` and SSE code. Keep sanitizer and CSP | **High** | Page side yes, host side no |
-| W3 | Desktop lifecycle. One process, a window per file; a second launch hands its path over a named pipe; exit when the last window closes. Remember window size and position; drag a `.md` onto a window to open it | **High** | No |
+| W2a | Transport-agnostic `DocumentHost`: all request handling moves out of `ReaderServer`, which becomes a thin HTTP/SSE adapter. Pure refactor; the existing HTTP suites, unmodified, are the acceptance test | **High** | Yes, fully |
+| W2b | Drop the server for pages. Windows answer the page's requests in-process via `WebResourceRequested` on `DocumentHost` (origin + token checks kept), and `reload`/`theme` are pushed into the window. Lifecycle is fed by window open/close instead of SSE clients. The HTTP listener shrinks to `/open` forwarding only. **The browser fallback goes** (it needs a page server): without WebView2, mdview shows Microsoft's download link until W5's installer bootstraps the runtime | **High** | Host side partly (in-process suites), window side via Windows black-box |
+| W3 | Desktop lifecycle. A second launch hands its path over a named pipe and the last HTTP listener is deleted; exit as soon as the last window closes, with no grace period. Remember window size and position; drag a `.md` onto a window to open it | **High** | No |
 | W4 | Win98 frame. Borderless-with-resize window, in-page title bar with drag region and caption buttons, maximize/restore state, active/inactive title colours, DPI | **High** | Title-bar geometry yes (`GeometryProbe`), window behaviour no |
-| W5 | Installer. Detect the WebView2 runtime and bootstrap it if missing; put the WebView2 profile in `%LOCALAPPDATA%\mdview`; retire `browserPath`/`bravePath` | Medium | CI only |
+| W5 | Installer. Detect the WebView2 runtime and bootstrap it if missing; retire `browserPath`/`bravePath` and the browser-launch code (dead since W2b). The WebView2 profile already lives in `%LOCALAPPDATA%\mdview\WebView2` (W1) | Medium | CI only |
 
 **W0 results (2026-09-28, run on the owner's Windows 10 desktop; `tools/W0Spike`).**
 

@@ -33,6 +33,11 @@ if (args.Length == 1 && args[0] == "--files")
     return await RunFileChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--limits")
+{
+    return await RunLimitChecksAsync();
+}
+
 if (args.Length == 1 && args[0] == "--browser")
 {
     return await RunBrowserChecksAsync();
@@ -45,7 +50,7 @@ if (args.Length == 1 && args[0] == "--edit")
 
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit | ServeProbe --browser");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit | ServeProbe --browser | ServeProbe --limits");
     return 1;
 }
 
@@ -115,6 +120,76 @@ static async Task<int> RunFileChecksAsync()
     failed |= !await RunCheckAsync("files-new-and-cancel", CheckNewAndCancelAsync);
     failed |= !await RunCheckAsync("files-modal-lifecycle-hold", CheckModalLifecycleHoldAsync);
     return failed ? 1 : 0;
+}
+
+static async Task<int> RunLimitChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("limits-unknown-route-answers-without-reading", CheckUnknownRouteUnreadAsync);
+    failed |= !await RunCheckAsync("limits-wrong-origin-answers-without-reading", CheckWrongOriginUnreadAsync);
+    failed |= !await RunCheckAsync("limits-declared-oversize-refused-unread", CheckDeclaredOversizeAsync);
+    failed |= !await RunCheckAsync("limits-small-routes-capped", CheckSmallRouteCapAsync);
+    return failed ? 1 : 0;
+}
+
+// Sends request headers that promise `declaredLength` body bytes and then sends none. A server that
+// answers has decided without reading the body; one that tries to read it stalls until the timeout.
+static async Task<int?> StatusWithoutBodyAsync(int port, string method, string path, string? origin, long declaredLength)
+{
+    using var tcp = new System.Net.Sockets.TcpClient();
+    await tcp.ConnectAsync("127.0.0.1", port);
+    var stream = tcp.GetStream();
+    var headers = $"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n" +
+        (origin is null ? "" : $"Origin: {origin}\r\n") + $"Content-Length: {declaredLength}\r\n\r\n";
+    await stream.WriteAsync(Encoding.ASCII.GetBytes(headers));
+    using var reader = new StreamReader(stream, Encoding.ASCII);
+    try
+    {
+        var line = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3));
+        return line is null ? null : int.Parse(line.Split(' ')[1], System.Globalization.CultureInfo.InvariantCulture);
+    }
+    catch (TimeoutException) { return null; }
+}
+
+static async Task CheckUnknownRouteUnreadAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("text\n");
+    var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/anything", null, 500_000_000);
+    Ensure(status == 404, $"An unknown route with a 500 MB declared body answered {status?.ToString() ?? "nothing within 3 s"}, not 404 without reading it.");
+}
+
+static async Task CheckWrongOriginUnreadAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("text\n");
+    foreach (var path in new[] { "/toggle", "/theme", $"/command/{fixture.Id}", $"/save/{fixture.Id}" })
+    {
+        var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", path, "https://evil.example", 1_000);
+        Ensure(status == 403, $"{path} from a foreign origin answered {status?.ToString() ?? "nothing within 3 s"}, not 403 before reading the body.");
+    }
+}
+
+static async Task CheckDeclaredOversizeAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("text\n");
+    var origin = $"http://127.0.0.1:{fixture.Server.Port}";
+    var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", $"/save/{fixture.Id}", origin, 64L * 1024 * 1024 + 1);
+    Ensure(status == 413, $"A save declaring 64 MiB + 1 answered {status?.ToString() ?? "nothing within 3 s"}, not 413 without reading.");
+    status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/open", null, 500_000_000);
+    Ensure(status == 413, $"/open declaring 500 MB answered {status?.ToString() ?? "nothing within 3 s"}, not 413 without reading.");
+}
+
+static async Task CheckSmallRouteCapAsync()
+{
+    await using var fixture = await ToggleFixture.CreateAsync("- [ ] task\n");
+    var padded = JsonSerializer.Serialize(new { id = fixture.Id, line = 1, @checked = false, token = fixture.Token, pad = new string('x', 70 * 1024) });
+    using var client = new HttpClient();
+    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{fixture.Server.Port}/toggle");
+    request.Headers.Add("Origin", $"http://127.0.0.1:{fixture.Server.Port}");
+    request.Content = new StringContent(padded, Encoding.UTF8, "application/json");
+    using var response = await client.SendAsync(request);
+    Ensure(response.StatusCode == HttpStatusCode.RequestEntityTooLarge, $"A 70 KiB toggle body answered {(int)response.StatusCode}, not 413.");
+    EnsureBytes(fixture.Path, "- [ ] task\n");
+    EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.NoContent);
 }
 
 static async Task<int> RunBrowserChecksAsync()
