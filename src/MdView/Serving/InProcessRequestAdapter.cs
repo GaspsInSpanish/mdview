@@ -9,9 +9,6 @@ public sealed class InProcessRequestAdapter(DocumentHost host)
         CancellationToken cancellationToken = default)
     {
         var maximum = DocumentHost.MaximumBodyBytes(uri.AbsolutePath);
-        if (method == "POST" && uri.AbsolutePath == "/open")
-            return new HostResponse((int)HttpStatusCode.NotFound, "text/plain; charset=utf-8",
-                "Not Found"u8.ToArray(), new Dictionary<string, string>());
         return body.LongLength > maximum
             ? new HostResponse((int)HttpStatusCode.RequestEntityTooLarge, "text/plain; charset=utf-8",
                 "Too Large"u8.ToArray(), new Dictionary<string, string>())

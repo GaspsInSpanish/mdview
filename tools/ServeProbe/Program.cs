@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Buffers.Binary;
+using System.IO.Pipes;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -34,9 +36,9 @@ if (args.Length == 1 && args[0] == "--files")
     return await RunFileChecksAsync();
 }
 
-if (args.Length == 1 && args[0] == "--limits")
+if (args.Length == 1 && args[0] == "--handoff")
 {
-    return await RunLimitChecksAsync();
+    return await RunHandOffChecksAsync();
 }
 
 if (args.Length == 1 && args[0] == "--browser")
@@ -56,15 +58,13 @@ if (args.Length == 1 && args[0] == "--transport")
 
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit | ServeProbe --transport | ServeProbe --browser | ServeProbe --limits");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit | ServeProbe --transport | ServeProbe --browser | ServeProbe --handoff");
     return 1;
 }
 
-using (var server = new ReaderServer())
+using (var host = new DocumentHost(() => DocumentHost.Origin))
 {
-    server.Start();
-    var document = server.RegisterDocument(args[0]);
-    Console.WriteLine($"port={server.Port}");
+    var document = host.RegisterDocument(args[0]);
     Console.WriteLine($"id={document.Id}");
 
     using var shutdown = new CancellationTokenSource();
@@ -214,83 +214,170 @@ static async Task<int> RunFileChecksAsync()
     return failed ? 1 : 0;
 }
 
-static async Task<int> RunLimitChecksAsync()
+static async Task<int> RunHandOffChecksAsync()
 {
     var failed = false;
-    failed |= !await RunCheckAsync("limits-unknown-route-answers-without-reading", CheckUnknownRouteUnreadAsync);
-    failed |= !await RunCheckAsync("limits-wrong-origin-host-boundary", CheckWrongOriginUnreadAsync);
-    failed |= !await RunCheckAsync("limits-declared-oversize-refused-unread", CheckDeclaredOversizeAsync);
-    failed |= !await RunCheckAsync("limits-small-routes-capped", CheckSmallRouteCapAsync);
+    failed |= !await RunCheckAsync("handoff-valid-and-rejections", CheckHandOffValidationAsync);
+    failed |= !await RunCheckAsync("handoff-oversize-unread", CheckHandOffOversizeAsync);
+    failed |= !await RunCheckAsync("handoff-truncated-loop-survives", CheckHandOffTruncatedAsync);
+    failed |= !await RunCheckAsync("handoff-slow-client-loop-survives", CheckHandOffSlowAsync);
+    failed |= !await RunCheckAsync("handoff-concurrent-clients", CheckHandOffConcurrencyAsync);
+    failed |= !await RunCheckAsync("handoff-create-failure-retried", CheckHandOffCreationRetryAsync);
+    failed |= !await RunCheckAsync("handoff-persistent-failure-reported-once", CheckHandOffPersistentFailureAsync);
     return failed ? 1 : 0;
 }
 
-// Sends request headers that promise `declaredLength` body bytes and then sends none. A server that
-// answers has decided without reading the body; one that tries to read it stalls until the timeout.
-static async Task<int?> StatusWithoutBodyAsync(int port, string method, string path, string? origin, long declaredLength)
+// On Linux named pipes are implemented with Unix-domain sockets; this exercises concurrency but cannot
+// reproduce Windows' named-pipe instance lifetime semantics. The PM also runs concurrent launches on Windows.
+static async Task CheckHandOffConcurrencyAsync()
 {
-    using var tcp = new System.Net.Sockets.TcpClient();
-    await tcp.ConnectAsync("127.0.0.1", port);
-    var stream = tcp.GetStream();
-    var headers = $"{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n" +
-        (origin is null ? "" : $"Origin: {origin}\r\n") + $"Content-Length: {declaredLength}\r\n\r\n";
-    await stream.WriteAsync(Encoding.ASCII.GetBytes(headers));
-    using var reader = new StreamReader(stream, Encoding.ASCII);
+    var directory = CreateProbeDirectory("handoff-concurrent");
     try
     {
-        var line = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(3));
-        return line is null ? null : int.Parse(line.Split(' ')[1], System.Globalization.CultureInfo.InvariantCulture);
+        var paths = Enumerable.Range(0, 10).Select(index => Path.Combine(directory, $"file-{index}.md")).ToArray();
+        foreach (var path in paths) await File.WriteAllTextAsync(path, $"# {Path.GetFileName(path)}\n");
+        using var host = new DocumentHost(() => DocumentHost.Origin);
+        var opened = new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
+        host.DocumentOpened += document => opened.AddOrUpdate(document.Path, 1, (_, count) => count + 1);
+        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        using var server = new HandOffPipeServer(host, pipeName);
+        var results = await Task.WhenAll(paths.Select(path => HandOffPipeClient.TrySendAsync(path, pipeName,
+            TimeSpan.FromSeconds(2))));
+        Ensure(results.All(result => result), "At least one concurrent hand-off was not accepted.");
+        Ensure(paths.All(path => opened.TryGetValue(path, out var count) && count == 1),
+            "A distinct concurrent document was not opened exactly once.");
+        Ensure(await HandOffPipeClient.TrySendAsync(paths[0], pipeName, TimeSpan.FromSeconds(2)),
+            "The accept loop did not serve a client after the concurrent batch.");
     }
-    catch (TimeoutException) { return null; }
+    finally { TryDeleteDirectory(directory); }
 }
 
-static async Task CheckUnknownRouteUnreadAsync()
+static async Task CheckHandOffCreationRetryAsync()
 {
-    await using var fixture = await ToggleFixture.CreateAsync("text\n");
-    fixture.StartListener();
-    var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/anything", null, 500_000_000);
-    Ensure(status == 404, $"An unknown route with a 500 MB declared body answered {status?.ToString() ?? "nothing within 3 s"}, not 404 without reading it.");
-}
-
-static async Task CheckWrongOriginUnreadAsync()
-{
-    await using var fixture = await ToggleFixture.CreateAsync("text\n");
-    foreach (var path in new[] { "/toggle", "/theme", $"/command/{fixture.Id}", $"/save/{fixture.Id}" })
+    var directory = CreateProbeDirectory("handoff-retry");
+    try
     {
-        var response = await fixture.Server.Host.HandleAsync(new HostRequest("POST", path,
-            "https://evil.example", "{}"u8.ToArray()));
-        Ensure(response.StatusCode == 403, $"{path} from a foreign origin answered {response.StatusCode}, not 403 at the host boundary.");
+        var path = Path.Combine(directory, "valid.md");
+        await File.WriteAllTextAsync(path, "# valid\n");
+        using var host = new DocumentHost(() => DocumentHost.Origin);
+        var attempts = 0;
+        NamedPipeServerStream Factory(string name, PipeOptions options)
+        {
+            if (Interlocked.Increment(ref attempts) == 1) throw new IOException("injected create failure");
+            return new NamedPipeServerStream(name, PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, options);
+        }
+        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        var reports = 0;
+        using var server = new HandOffPipeServer(host, pipeName, pipeFactory: Factory,
+            reportError: _ => Interlocked.Increment(ref reports));
+        Ensure(await HandOffPipeClient.TrySendAsync(path, pipeName, TimeSpan.FromSeconds(2)),
+            "The server did not recover from an injected creation failure.");
+        Ensure(attempts >= 2, "The injected creation failure was not retried.");
+        await Task.Delay(300);
+        Ensure(reports == 0, "A creation failure that cleared at once put a warning box in front of the user.");
     }
-    fixture.StartListener();
-    var routes = new[] { ("GET", $"/d/{fixture.Id}"), ("GET", $"/events/{fixture.Id}"),
-        ("POST", "/toggle"), ("POST", "/theme"), ("POST", $"/command/{fixture.Id}"),
-        ("POST", $"/save/{fixture.Id}") };
-    foreach (var (method, path) in routes)
-        Ensure(await StatusWithoutBodyAsync(fixture.Server.Port, method, path, null, method == "POST" ? 1_000 : 0) == 404,
-            $"{method} {path} was not 404 over the hand-off listener.");
-    Ensure(await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/open", "https://evil.example", 1_000) == 403,
-        "POST /open with an Origin header was not rejected before reading its body.");
+    finally { TryDeleteDirectory(directory); }
 }
 
-static async Task CheckDeclaredOversizeAsync()
+// A hand-off outage that persists is reported once, and not before it has lasted a few seconds.
+static async Task CheckHandOffPersistentFailureAsync()
 {
-    await using var fixture = await ToggleFixture.CreateAsync("text\n");
-    var save = await fixture.Server.Host.HandleAsync(new HostRequest("POST", $"/save/{fixture.Id}",
-        DocumentHost.Origin, new byte[DocumentHost.MaximumEditBodyBytes + 1]));
-    Ensure(save.StatusCode == 413, $"A save of 64 MiB + 1 answered {save.StatusCode}, not 413 at the host boundary.");
-    fixture.StartListener();
-    var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/open", null, 500_000_000);
-    Ensure(status == 413, $"/open declaring 500 MB answered {status?.ToString() ?? "nothing within 3 s"}, not 413 without reading.");
+    using var host = new DocumentHost(() => DocumentHost.Origin);
+    var reports = 0;
+    NamedPipeServerStream AlwaysFails(string name, PipeOptions options) => throw new IOException("injected outage");
+    using var server = new HandOffPipeServer(host, $"mdview-probe-{Guid.NewGuid():N}", pipeFactory: AlwaysFails,
+        reportError: _ => Interlocked.Increment(ref reports));
+    await Task.Delay(TimeSpan.FromSeconds(2));
+    Ensure(reports == 0, "An outage was reported after 2 s, before it could be told apart from a routine blip.");
+    await Task.Delay(TimeSpan.FromSeconds(5));
+    Ensure(reports == 1, $"A persistent outage produced {reports} warnings, not exactly one.");
 }
 
-static async Task CheckSmallRouteCapAsync()
+static async Task CheckHandOffValidationAsync()
 {
-    await using var fixture = await ToggleFixture.CreateAsync("- [ ] task\n");
-    var padded = JsonSerializer.Serialize(new { id = fixture.Id, line = 1, @checked = false, token = fixture.Token, pad = new string('x', 70 * 1024) });
-    var response = await fixture.Server.Host.HandleAsync(new HostRequest("POST", "/toggle", DocumentHost.Origin,
-        Encoding.UTF8.GetBytes(padded)));
-    Ensure(response.StatusCode == (int)HttpStatusCode.RequestEntityTooLarge, $"A 70 KiB toggle body answered {response.StatusCode}, not 413.");
-    EnsureBytes(fixture.Path, "- [ ] task\n");
-    EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.NoContent);
+    var directory = CreateProbeDirectory("handoff");
+    try
+    {
+        var path = Path.Combine(directory, "valid.md");
+        var unsupported = Path.Combine(directory, "unsupported.txt");
+        await File.WriteAllTextAsync(path, "# valid\n");
+        await File.WriteAllTextAsync(unsupported, "text\n");
+        using var host = new DocumentHost(() => DocumentHost.Origin);
+        var opened = new TaskCompletionSource<RegisteredDocument>(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.DocumentOpened += document => opened.TrySetResult(document);
+        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromMilliseconds(400));
+        Ensure(await HandOffPipeClient.TrySendAsync(path, pipeName), "A valid path was rejected.");
+        Ensure((await opened.Task.WaitAsync(TimeSpan.FromSeconds(1))).Path == path, "DocumentOpened had the wrong path.");
+        Ensure(!await HandOffPipeClient.TrySendAsync(Path.Combine(directory, "missing.md"), pipeName),
+            "A nonexistent path was accepted.");
+        Ensure(!await HandOffPipeClient.TrySendAsync(unsupported, pipeName), "An unsupported extension was accepted.");
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static async Task CheckHandOffOversizeAsync()
+{
+    using var host = new DocumentHost(() => DocumentHost.Origin);
+    var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+    using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromSeconds(2));
+    using var client = await ConnectPipeAsync(pipeName);
+    var header = new byte[4];
+    BinaryPrimitives.WriteInt32LittleEndian(header, HandOffPipeServer.MaximumPathBytes + 1);
+    await client.WriteAsync(header);
+    var reply = new byte[1];
+    Ensure(await client.ReadAsync(reply).AsTask().WaitAsync(TimeSpan.FromSeconds(1)) == 1 && reply[0] == 0,
+        "An oversize declaration was not rejected without reading its payload.");
+}
+
+static async Task CheckHandOffTruncatedAsync()
+{
+    var directory = CreateProbeDirectory("handoff-truncated");
+    try
+    {
+        var path = Path.Combine(directory, "valid.md");
+        await File.WriteAllTextAsync(path, "# valid\n");
+        using var host = new DocumentHost(() => DocumentHost.Origin);
+        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromMilliseconds(300));
+        using (var client = await ConnectPipeAsync(pipeName))
+        {
+            var header = new byte[4];
+            BinaryPrimitives.WriteInt32LittleEndian(header, 10);
+            await client.WriteAsync(header);
+            await client.WriteAsync("short"u8.ToArray());
+        }
+        Ensure(await HandOffPipeClient.TrySendAsync(path, pipeName, TimeSpan.FromSeconds(1)),
+            "A truncated request killed the accept loop.");
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static async Task CheckHandOffSlowAsync()
+{
+    var directory = CreateProbeDirectory("handoff-slow");
+    try
+    {
+        var path = Path.Combine(directory, "valid.md");
+        await File.WriteAllTextAsync(path, "# valid\n");
+        using var host = new DocumentHost(() => DocumentHost.Origin);
+        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromMilliseconds(200));
+        using var slow = await ConnectPipeAsync(pipeName);
+        await Task.Delay(350);
+        Ensure(await HandOffPipeClient.TrySendAsync(path, pipeName, TimeSpan.FromSeconds(1)),
+            "A slow client killed or permanently occupied the accept loop.");
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static async Task<NamedPipeClientStream> ConnectPipeAsync(string pipeName)
+{
+    var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut,
+        PipeOptions.CurrentUserOnly | PipeOptions.Asynchronous);
+    await client.ConnectAsync(1000);
+    return client;
 }
 
 static async Task<int> RunBrowserChecksAsync()
@@ -674,7 +761,7 @@ static async Task CheckModalLifecycleHoldAsync()
     using var coordinator = new InstanceCoordinator(stateDirectory);
     var launcher = new StubBrowserLauncher();
     var signals = new StubLifecycleSignals(fixture.Server.Host, launcher);
-    using var lifecycle = new Lifecycle(fixture.Server, signals, coordinator, launcher,
+    using var lifecycle = new Lifecycle(fixture.Server.Host, new NoOpDisposable(), signals, coordinator, launcher,
         TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(3));
     signals.Connect();
     var events = await fixture.ConnectEventsAsync();
@@ -1159,6 +1246,9 @@ static async Task<int> RunLifecycleChecksAsync(string path)
     }
 
     await CheckLastDisconnectAsync(path);
+    await CheckImmediateLastDisconnectAsync(path);
+    await CheckInFlightHandOffAtShutdownAsync(path);
+    await CheckFaultedHandOffShutdownAsync(path);
     await CheckGraceCancellationAsync(path);
     await CheckDocumentOpenDuringGraceAsync(path);
     await CheckAbandonedExpectedWindowAsync(path);
@@ -1169,8 +1259,122 @@ static async Task<int> RunLifecycleChecksAsync(string path)
     CheckOpeningDocumentGuard();
     CheckLaunchFailureClassification();
     CheckPendingLaunchSet();
+    CheckHandOffRaceBecomesPrimary();
     await CheckExitWithPendingLaunchAsync(path);
     return 0;
+}
+
+static async Task CheckInFlightHandOffAtShutdownAsync(string path)
+{
+    var stateDirectory = CreateProbeDirectory("lifecycle-inflight");
+    using var coordinator = new InstanceCoordinator(stateDirectory);
+    var host = new DocumentHost(() => DocumentHost.Origin);
+    var launcher = new StubBrowserLauncher();
+    var signals = new StubLifecycleSignals(host, launcher);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var pipeFailure = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    Lifecycle? lifecycle = null;
+    var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+    var server = new HandOffPipeServer(host, pipeName, accept: document =>
+    {
+        entered.TrySetResult();
+        release.Task.GetAwaiter().GetResult();
+        return lifecycle?.TryAcceptHandOff(document) == true;
+    }, reportError: message => pipeFailure.TrySetResult(message));
+    lifecycle = new Lifecycle(host, server, signals, coordinator, launcher, TimeSpan.Zero, TimeSpan.FromSeconds(3));
+    var document = host.RegisterDocument(path);
+    Ensure(lifecycle.TryLaunch(document), "The in-flight fixture could not launch its initial document.");
+    signals.Connect();
+    var client = HandOffPipeClient.TrySendDetailedAsync(path, pipeName, TimeSpan.FromSeconds(1),
+        TimeSpan.FromSeconds(2));
+    try { await entered.Task.WaitAsync(TimeSpan.FromSeconds(2)); }
+    catch (TimeoutException) when (pipeFailure.Task.IsCompleted)
+    {
+        signals.Disconnect();
+        release.TrySetResult();
+        await lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(2));
+        Console.WriteLine($"inflight-handoff-shutdown=skipped detail={await pipeFailure.Task}");
+        lifecycle.Dispose();
+        TryDeleteDirectory(stateDirectory);
+        return;
+    }
+    signals.Disconnect();
+    await WaitUntilAsync(() => lifecycle.IsShuttingDown, TimeSpan.FromSeconds(1));
+    release.TrySetResult();
+    Ensure(await client == HandOffResult.Rejected, "A hand-off admitted during shutdown was not rejected.");
+    await lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(2));
+    Console.WriteLine("inflight-handoff-shutdown=passed reply=rejected deadlock=false");
+    lifecycle.Dispose();
+    TryDeleteDirectory(stateDirectory);
+}
+
+static async Task CheckFaultedHandOffShutdownAsync(string path)
+{
+    var stateDirectory = CreateProbeDirectory("lifecycle-faulted-pipe");
+    using var coordinator = new InstanceCoordinator(stateDirectory);
+    var host = new DocumentHost(() => DocumentHost.Origin);
+    var server = new HandOffPipeServer(host, acceptLoopOverride: _ =>
+        Task.FromException(new InvalidOperationException("injected accept-loop fault")));
+    var launcher = new StubBrowserLauncher();
+    var signals = new StubLifecycleSignals(host, launcher);
+    using var lifecycle = new Lifecycle(host, server, signals, coordinator, launcher,
+        TimeSpan.Zero, TimeSpan.FromSeconds(3));
+    Ensure(lifecycle.TryLaunch(host.RegisterDocument(path)), "The faulted-pipe fixture could not launch.");
+    signals.Connect();
+    signals.Disconnect();
+    await lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(2));
+    // Completion alone proves little: Shutdown sets it in a finally. The orphan this guards against is a
+    // shutdown that never released the single-instance mutex, so a later launch must be able to take it.
+    var successorDirectory = CreateProbeDirectory("lifecycle-faulted-pipe-successor");
+    using (var successor = new InstanceCoordinator(successorDirectory))
+        Ensure(successor.IsPrimary || successor.TryBecomePrimary(),
+            "Shutdown after a faulted hand-off loop left the single-instance mutex held.");
+    TryDeleteDirectory(successorDirectory);
+    Console.WriteLine("faulted-handoff-shutdown=passed completion=true mutex-released=true");
+    TryDeleteDirectory(stateDirectory);
+}
+
+static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
+{
+    var deadline = DateTime.UtcNow + timeout;
+    while (!predicate())
+    {
+        if (DateTime.UtcNow >= deadline) throw new TimeoutException("Condition was not reached before timeout.");
+        await Task.Delay(10);
+    }
+}
+
+static void CheckHandOffRaceBecomesPrimary()
+{
+    var firstDirectory = CreateProbeDirectory("race-primary");
+    var secondDirectory = CreateProbeDirectory("race-secondary");
+    try
+    {
+        using var primary = new InstanceCoordinator(firstDirectory);
+        using var secondary = new InstanceCoordinator(secondDirectory);
+        Ensure(primary.IsPrimary && !secondary.IsPrimary, "The race fixture did not establish primary/secondary roles.");
+        primary.Dispose();
+        Ensure(secondary.TryBecomePrimary(), "The secondary did not become primary after the mutex was released.");
+        Console.WriteLine("mutex-handover=passed secondary-became-primary=true");
+    }
+    finally
+    {
+        TryDeleteDirectory(firstDirectory);
+        TryDeleteDirectory(secondDirectory);
+    }
+}
+
+static async Task CheckImmediateLastDisconnectAsync(string path)
+{
+    var fixture = StartFixture(path, TimeSpan.Zero, TimeSpan.FromSeconds(10));
+    fixture.Signals.Connect();
+    var started = System.Diagnostics.Stopwatch.StartNew();
+    fixture.Signals.Disconnect();
+    await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromMilliseconds(200));
+    Ensure(started.Elapsed < TimeSpan.FromMilliseconds(200), "Grace-zero shutdown was not immediate.");
+    Console.WriteLine($"last-disconnect-immediate=passed elapsed-ms={started.ElapsedMilliseconds}");
+    fixture.Dispose();
 }
 
 // N1: re-opening an open file resolves as SatisfiedByExisting; a later modal command must not leave the
@@ -1312,7 +1516,7 @@ static async Task CheckLastDisconnectAsync(string path)
     fixture.Signals.Connect();
     fixture.Signals.Disconnect();
     await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(8));
-    Console.WriteLine($"last-disconnect=passed handshake-deleted={!File.Exists(fixture.HandshakePath)}");
+    Console.WriteLine("last-disconnect=passed");
     fixture.Dispose();
 }
 
@@ -1335,7 +1539,7 @@ static async Task CheckGraceCancellationAsync(string path)
     Console.WriteLine("grace-cancellation=passed process-still-running=true");
     fixture.Lifecycle.Shutdown();
     await fixture.Lifecycle.Completion;
-    Console.WriteLine($"grace-cancellation-cleanup handshake-deleted={!File.Exists(fixture.HandshakePath)}");
+    Console.WriteLine("grace-cancellation-cleanup=passed");
     fixture.Dispose();
 }
 
@@ -1343,7 +1547,7 @@ static async Task CheckStartupGuardAsync(string path)
 {
     var fixture = StartFixture(path, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(500));
     await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(3));
-    Console.WriteLine($"startup-guard=passed handshake-deleted={!File.Exists(fixture.HandshakePath)}");
+    Console.WriteLine("startup-guard=passed");
     fixture.Dispose();
 }
 
@@ -1359,12 +1563,10 @@ static async Task CheckDocumentOpenDuringGraceAsync(string path)
     await Task.Delay(TimeSpan.FromMilliseconds(750));
     var secondPath = Path.Combine(Path.GetDirectoryName(path)!, "mdview-lifecycle-second.md");
     await File.WriteAllTextAsync(secondPath, "# Second document\n");
-    var openResponse = await fixture.Server.Host.HandleAsync(new HostRequest("POST", "/open", null,
-        Encoding.UTF8.GetBytes(secondPath)));
-    using var openJson = JsonDocument.Parse(openResponse.Body);
-    var secondId = openJson.RootElement.GetProperty("id").GetString()
-        ?? throw new InvalidOperationException("The open response did not contain an ID.");
-    var secondUrl = $"{DocumentHost.Origin}/d/{secondId}";
+    RegisteredDocument? opened = null;
+    fixture.Server.Host.DocumentOpened += document => opened = document;
+    Ensure(fixture.Server.Host.OpenFromHandOff(secondPath), "The hand-off path was rejected.");
+    var secondId = opened?.Id ?? throw new InvalidOperationException("The hand-off did not raise DocumentOpened.");
 
     await Task.Delay(TimeSpan.FromMilliseconds(600));
     var page = await fixture.Server.Host.HandleAsync(new HostRequest("GET", $"/d/{secondId}", null, []));
@@ -1377,7 +1579,7 @@ static async Task CheckDocumentOpenDuringGraceAsync(string path)
     fixture.Signals.Disconnect();
 
     await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(8));
-    Console.WriteLine($"document-open-during-grace=passed handshake-deleted={!File.Exists(fixture.HandshakePath)}");
+    Console.WriteLine("document-open-during-grace=passed");
     fixture.Dispose();
     try { File.Delete(secondPath); } catch (IOException) { }
 }
@@ -1392,12 +1594,11 @@ static Fixture StartFixture(string path, TimeSpan grace, TimeSpan startup)
         throw new InvalidOperationException("Lifecycle probe could not acquire its single-instance mutex.");
     }
 
-    var server = new ReaderServer();
+    var server = new ProbeHost();
     var document = server.RegisterDocument(path);
-    coordinator.WriteHandshake(7717);
     var launcher = new StubBrowserLauncher();
     var signals = new StubLifecycleSignals(server.Host, launcher);
-    var lifecycle = new Lifecycle(server, signals, coordinator, launcher, grace, startup);
+    var lifecycle = new Lifecycle(server.Host, new NoOpDisposable(), signals, coordinator, launcher, grace, startup);
     if (!lifecycle.TryLaunch(document) || launcher.Url is null ||
         !Uri.TryCreate(launcher.Url, UriKind.Absolute, out var uri) ||
         uri.GetLeftPart(UriPartial.Authority) != DocumentHost.Origin ||
@@ -1408,7 +1609,7 @@ static Fixture StartFixture(string path, TimeSpan grace, TimeSpan startup)
     }
 
     Console.WriteLine($"stub-url={launcher.Url}");
-    return new Fixture(server, signals, lifecycle, coordinator.HandshakePath, stateDirectory, launcher.Url, launcher);
+    return new Fixture(server, signals, lifecycle, stateDirectory, launcher.Url, launcher);
 }
 
 sealed class StubBrowserLauncher : IBrowserLauncher, IQueuedWindowLauncher
@@ -1511,7 +1712,7 @@ sealed class PumpSynchronizationContext : SynchronizationContext, IDisposable
     public void Dispose() => callbacks.Dispose();
 }
 
-sealed record Fixture(ReaderServer Server, StubLifecycleSignals Signals, Lifecycle Lifecycle, string HandshakePath,
+sealed record Fixture(ProbeHost Server, StubLifecycleSignals Signals, Lifecycle Lifecycle,
     string StateDirectory, string Url, StubBrowserLauncher Launcher) : IDisposable
 {
     public void Dispose()
@@ -1528,10 +1729,9 @@ sealed class ToggleFixture : IAsyncDisposable
         RegexOptions.CultureInvariant);
 
     private readonly string directory;
-    private readonly ReaderServer server;
-    private readonly HttpClient client = new();
+    private readonly ProbeHost server;
 
-    private ToggleFixture(string directory, string path, ReaderServer server, string id, string token, string html,
+    private ToggleFixture(string directory, string path, ProbeHost server, string id, string token, string html,
         string? contentSecurityPolicy)
     {
         this.directory = directory;
@@ -1548,8 +1748,7 @@ sealed class ToggleFixture : IAsyncDisposable
     internal string Token { get; }
     internal string Html { get; }
     internal string? ContentSecurityPolicy { get; }
-    internal ReaderServer Server => server;
-    internal void StartListener() => server.Start();
+    internal ProbeHost Server => server;
 
     internal static Task<ToggleFixture> CreateAsync(string source, ThemeConfigStore? themeConfig = null,
         IFileDialogProvider? fileDialogs = null) =>
@@ -1562,7 +1761,7 @@ sealed class ToggleFixture : IAsyncDisposable
         Directory.CreateDirectory(directory);
         var path = System.IO.Path.Combine(directory, "fixture.md");
         await File.WriteAllBytesAsync(path, source);
-        var server = new ReaderServer(themeConfig: themeConfig, fileDialogs: fileDialogs);
+        var server = new ProbeHost(themeConfig, fileDialogs);
         try
         {
             var document = server.RegisterDocument(path);
@@ -1676,11 +1875,25 @@ sealed class ToggleFixture : IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
-        client.Dispose();
         server.Dispose();
         try { Directory.Delete(directory, true); } catch (IOException) { }
         return ValueTask.CompletedTask;
     }
+}
+
+sealed class ProbeHost : IDisposable
+{
+    internal ProbeHost(ThemeConfigStore? themeConfig = null, IFileDialogProvider? fileDialogs = null) =>
+        Host = new DocumentHost(() => DocumentHost.Origin, themeConfig: themeConfig, fileDialogs: fileDialogs);
+
+    internal DocumentHost Host { get; }
+    internal RegisteredDocument RegisterDocument(string path) => Host.RegisterDocument(path);
+    public void Dispose() => Host.Dispose();
+}
+
+sealed class NoOpDisposable : IDisposable
+{
+    public void Dispose() { }
 }
 
 sealed record CommandResponse(HttpStatusCode StatusCode, string? DocumentId);

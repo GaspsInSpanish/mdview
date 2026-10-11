@@ -100,8 +100,6 @@ public sealed class DocumentHost : IDisposable
             request = StripUtf8Bom(request);
             if (request.Method == "GET" && TryGetDocumentRoute(segments, "d", out var document))
                 return await ServeDocumentAsync(document).ConfigureAwait(false);
-            if (request.Method == "POST" && segments.Length == 1 && segments[0] == "open")
-                return await OpenDocumentAsync(request).ConfigureAwait(false);
             if (request.Method == "POST" && segments.Length == 1 && segments[0] == "toggle")
                 return await ToggleAsync(request).ConfigureAwait(false);
             if (request.Method == "POST" && segments.Length == 1 && segments[0] == "theme")
@@ -126,7 +124,7 @@ public sealed class DocumentHost : IDisposable
     {
         if (segments.Length == 1)
         {
-            return segments[0] is "open" or "toggle" or "theme";
+            return segments[0] is "toggle" or "theme";
         }
 
         return segments.Length == 2 && segments[0] is "command" or "source" or "render" or "save" &&
@@ -164,16 +162,18 @@ public sealed class DocumentHost : IDisposable
             new Dictionary<string, string> { ["Content-Security-Policy"] = csp });
     }
 
-    private Task<HostResponse> OpenDocumentAsync(HostRequest request)
+    public bool OpenFromHandOff(string path, Func<RegisteredDocument, bool>? accept = null)
     {
         try
         {
-            var document = RegisterAndNotify(Encoding.UTF8.GetString(request.Body));
-            return Task.FromResult(Json(new { id = document.Id }));
+            var document = RegisterDocument(path);
+            if (accept is not null) return accept(document);
+            Notify(DocumentOpened, document);
+            return true;
         }
         catch (Exception exception) when (exception is ArgumentException or FileNotFoundException)
         {
-            return Task.FromResult(Status(HttpStatusCode.BadRequest, "Unsupported document path."));
+            return false;
         }
     }
 

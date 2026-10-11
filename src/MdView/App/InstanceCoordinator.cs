@@ -1,8 +1,3 @@
-using System.Diagnostics;
-using System.Net.Http.Json;
-using System.Reflection;
-using System.Text.Json;
-
 namespace MdView.App;
 
 public sealed class InstanceCoordinator : IDisposable
@@ -10,15 +5,17 @@ public sealed class InstanceCoordinator : IDisposable
     private const string MutexName = @"Local\mdview-singleton";
     private readonly ManualResetEventSlim ownerReady = new(false);
     private readonly ManualResetEventSlim releaseOwner = new(false);
+    private readonly AutoResetEvent acquireRequested = new(false);
+    private readonly AutoResetEvent acquireCompleted = new(false);
     private readonly Thread ownerThread;
     private Exception? ownerFailure;
+    private volatile bool isPrimary;
     private bool disposed;
 
     public InstanceCoordinator(string? stateDirectory = null)
     {
         StateDirectory = stateDirectory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "mdview");
-        HandshakePath = Path.Combine(StateDirectory, "instance.json");
         ownerThread = new Thread(OwnMutex) { IsBackground = true, Name = "mdview mutex owner" };
         ownerThread.Start();
         ownerReady.Wait();
@@ -28,9 +25,8 @@ public sealed class InstanceCoordinator : IDisposable
         }
     }
 
-    public bool IsPrimary { get; private set; }
+    public bool IsPrimary => isPrimary;
     public string StateDirectory { get; }
-    public string HandshakePath { get; }
 
     private void OwnMutex()
     {
@@ -39,121 +35,63 @@ public sealed class InstanceCoordinator : IDisposable
         {
             try
             {
-                IsPrimary = mutex.WaitOne(TimeSpan.Zero);
+                isPrimary = mutex.WaitOne(TimeSpan.Zero);
             }
             catch (AbandonedMutexException)
             {
-                IsPrimary = true;
+                isPrimary = true;
             }
             finally
             {
                 ownerReady.Set();
             }
 
-            if (IsPrimary)
+            while (!isPrimary)
             {
-                releaseOwner.Wait();
-                mutex.ReleaseMutex();
+                var signal = WaitHandle.WaitAny([releaseOwner.WaitHandle, acquireRequested]);
+                if (signal == 0) return;
+                try
+                {
+                    isPrimary = mutex.WaitOne(TimeSpan.Zero);
+                }
+                catch (AbandonedMutexException)
+                {
+                    isPrimary = true;
+                }
+                finally
+                {
+                    acquireCompleted.Set();
+                }
             }
+
+            releaseOwner.Wait();
+            mutex.ReleaseMutex();
         }
         catch (Exception exception)
         {
             ownerFailure = exception;
             ownerReady.Set();
+            acquireCompleted.Set();
         }
     }
 
-    public void WriteHandshake(int port)
+    public bool TryBecomePrimary()
     {
-        if (!IsPrimary)
-        {
-            throw new InvalidOperationException("Only the primary instance can write the handshake.");
-        }
-
-        Directory.CreateDirectory(StateDirectory);
-        var value = new Handshake(port, Environment.ProcessId,
-            Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "unknown");
-        var temporaryPath = Path.Combine(StateDirectory, $"instance.{Guid.NewGuid():N}.tmp");
-        try
-        {
-            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(value));
-            File.Move(temporaryPath, HandshakePath, true);
-        }
-        finally
-        {
-            File.Delete(temporaryPath);
-        }
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (isPrimary) return true;
+        acquireRequested.Set();
+        acquireCompleted.WaitOne();
+        if (ownerFailure is not null)
+            throw new InvalidOperationException("mdview could not acquire its single-instance coordinator.", ownerFailure);
+        return isPrimary;
     }
 
-    public async Task<bool> TryForwardAsync(string path, TimeSpan retryWindow, CancellationToken cancellationToken = default)
+    public void DeleteLegacyHandshake()
     {
-        var deadline = DateTime.UtcNow + retryWindow;
-        using var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(700) };
-        do
-        {
-            if (TryReadLiveHandshake(out var handshake))
-            {
-                try
-                {
-                    using var content = new StringContent(path);
-                    using var response = await client.PostAsync(
-                        $"http://127.0.0.1:{handshake.Port}/open", content, cancellationToken).ConfigureAwait(false);
-                    if (response.IsSuccessStatusCode)
-                    {
-                        return true;
-                    }
-                }
-                catch (HttpRequestException) { }
-                catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested) { }
-            }
-
-            var remaining = deadline - DateTime.UtcNow;
-            if (remaining <= TimeSpan.Zero)
-            {
-                break;
-            }
-
-            await Task.Delay(remaining < TimeSpan.FromMilliseconds(250) ? remaining : TimeSpan.FromMilliseconds(250),
-                cancellationToken).ConfigureAwait(false);
-        }
-        while (true);
-
-        return false;
-    }
-
-    private bool TryReadLiveHandshake(out Handshake handshake)
-    {
-        handshake = default!;
-        try
-        {
-            var parsed = JsonSerializer.Deserialize<Handshake>(File.ReadAllText(HandshakePath));
-            if (parsed is null || parsed.Port is < 1 or > 65535 || parsed.Pid <= 0)
-            {
-                return false;
-            }
-
-            using var process = Process.GetProcessById(parsed.Pid);
-            if (process.HasExited)
-            {
-                return false;
-            }
-
-            handshake = parsed;
-            return true;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-            JsonException or ArgumentException or InvalidOperationException)
-        {
-            return false;
-        }
-    }
-
-    public void DeleteHandshake()
-    {
-        if (IsPrimary)
-        {
-            try { File.Delete(HandshakePath); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-        }
+        // Compatibility cleanup for pre-W3A releases; remove after the next release cycle.
+        if (!IsPrimary) return;
+        var path = Path.Combine(StateDirectory, "instance.json");
+        try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 
     public void Dispose()
@@ -164,12 +102,11 @@ public sealed class InstanceCoordinator : IDisposable
         }
 
         disposed = true;
-        DeleteHandshake();
         releaseOwner.Set();
         ownerThread.Join();
         ownerReady.Dispose();
         releaseOwner.Dispose();
+        acquireRequested.Dispose();
+        acquireCompleted.Dispose();
     }
-
-    private sealed record Handshake(int Port, int Pid, string Version);
 }

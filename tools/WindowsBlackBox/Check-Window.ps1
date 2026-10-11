@@ -117,6 +117,32 @@ $deadline = (Get-Date).AddSeconds(20); $both = @()
 while ((Get-Date) -lt $deadline -and $both.Count -lt 2) { Start-Sleep -Milliseconds 300; $both = @(Windows $p.Id | Where-Object { $_ -match '\|Black box (alpha|beta)' }) }
 Check 'second-launch-forwards-to-same-process' ($second.ExitCode -eq 0 -and $both.Count -eq 2) ("forwarder exit={0}; windows in primary: {1}" -f $second.ExitCode, ($both -join ' ;; '))
 
+# Several files launched at once (W3a review B1): on Windows a pipe instance is freed only when both
+# ends close, so a burst of secondaries is what kills a single-instance hand-off server. Two bursts of
+# five distinct files, then one more launch to prove the hand-off still works afterwards.
+$burstOk = $true; $burstDetail = @()
+foreach ($round in 1..2) {
+  $paths = foreach ($i in 1..5) { $f = Join-Path $WorkDir "Black box burst $round-$i.md"; [IO.File]::WriteAllText($f, "# Burst $round-$i`r`n", $utf8); $f }
+  $launched = foreach ($f in $paths) { Start-Process -FilePath $Exe -ArgumentList "`"$f`"" -PassThru }
+  $launched | ForEach-Object { $_.WaitForExit(15000) | Out-Null }
+  $codes = ($launched | ForEach-Object { $_.ExitCode }) -join ','
+  $deadline = (Get-Date).AddSeconds(25); $found = @()
+  while ((Get-Date) -lt $deadline -and $found.Count -lt 5) { Start-Sleep -Milliseconds 400; $found = @(Windows $p.Id | Where-Object { $_ -match "\|Black box burst $round-" }) }
+  $burstDetail += "round $round forwarder exits=[$codes] windows=$($found.Count)"
+  if ($found.Count -ne 5 -or $codes -ne '0,0,0,0,0') { $burstOk = $false }
+}
+$after = Join-Path $WorkDir 'Black box after burst.md'; [IO.File]::WriteAllText($after, "# After`r`n", $utf8)
+$last = Start-Process -FilePath $Exe -ArgumentList "`"$after`"" -PassThru -Wait
+$deadline = (Get-Date).AddSeconds(20); $afterWindow = $null
+while ((Get-Date) -lt $deadline -and -not $afterWindow) { Start-Sleep -Milliseconds 300; $afterWindow = Windows $p.Id | Where-Object { $_ -match '\|Black box after burst' } | Select-Object -First 1 }
+$burstDetail += "after-burst forwarder exit=$($last.ExitCode) window=$($null -ne $afterWindow)"
+Check 'burst-launches-each-open-once-and-handoff-survives' ($burstOk -and $last.ExitCode -eq 0 -and $afterWindow) ($burstDetail -join '; ')
+
+# Nothing in the normal flow or the bursts should put a message box in front of the user (W3a review:
+# transient hand-off failures used to raise a "temporarily unavailable" warning).
+$dialogs = @(Windows $p.Id | Where-Object { $_ -match '\|#32770\|' })
+Check 'no-warning-boxes-in-normal-use' ($dialogs.Count -eq 0) ("message boxes open in mdview: {0}" -f (($dialogs | ForEach-Object { [MdViewBlackBox]::DialogText([IntPtr][long]($_.Split('|')[0])) }) -join ' | '))
+
 $browsers = @(Get-CimInstance Win32_Process -Filter "Name='brave.exe' OR Name='chrome.exe' OR Name='msedge.exe'" | Where-Object { $_.CommandLine -match '127\.0\.0\.1:7[78]' })
 Check 'no-browser-launched' ($browsers.Count -eq 0) ("browser processes pointed at mdview: {0}" -f $browsers.Count)
 

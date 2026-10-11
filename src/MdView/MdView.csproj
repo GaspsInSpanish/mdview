@@ -15,7 +15,7 @@
     <SelfContained>true</SelfContained>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <!-- Trimming is intentionally OFF: Markdig + HttpListener reflection make it risky
+    <!-- Trimming is intentionally OFF: Markdig and WebView2 use reflection, making it risky
          for a ~5MB saving. Revisit only with a real size complaint. -->
     <PublishTrimmed>false</PublishTrimmed>
     <ApplicationManifest>app.manifest</ApplicationManifest>

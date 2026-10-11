@@ -14,8 +14,9 @@ A Windows desktop utility. Double-clicking a `.md` file renders it with
 Claude-artifact-style typography and opens it in **its own native window hosting
 WebView2** (v1.4, `W1-WINDOW`), live-reloading when the file changes on disk. Since
 `W2B-INPROCESS` each window answers its page's requests in-process (private origin
-`https://mdview.example`); the loopback listener carries only a second launch's `/open`
-hand-off, and there is no browser fallback. Distributed as an installer
+`https://mdview.example`), and there is no browser fallback. Since `W3A-PIPE` there is
+no network listener at all: a second launch hands its path over a current-user-only named
+pipe. Distributed as an installer
 from GitHub Releases.
 
 It is a *reading* tool first. Every page loads locked; editing happens only after the
@@ -27,7 +28,7 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
   `net8.0-windows`, `win-x64`, `PublishSingleFile`, `SelfContained`.
 - `OutputType` is **`WinExe`, never `Exe`** — an `Exe` flashes a console window every
   time the user double-clicks a `.md`. This is a product defect, not a preference.
-- **`PublishTrimmed` stays `false`.** Markdig and `HttpListener` use reflection;
+- **`PublishTrimmed` stays `false`.** Markdig and `System.Text.Json` use reflection;
   trimming risks runtime breakage for a few MB. Do not flip it without evidence.
 - No system-wide `dotnet` here — the SDK is at `~/.dotnet`. Run
   `export PATH="$HOME/.dotnet:$PATH"` first if `dotnet` isn't found.
@@ -43,10 +44,10 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
   *(Corrected 2026-10-10: WebView2 was added in `W1-WINDOW`, v1.4, while this line still
   said Markdig was the only one.)* Only WebView2's `Core` assembly and native loader are
   used; `MdView.csproj` deliberately excludes its WPF/WinForms wrappers (they cost warning
-  MSB3277 and ~35 MB). Everything else comes from the BCL: `HttpListener` for the
-  loopback listener, `FileSystemWatcher` for change detection, `Mutex` for
-  single-instance, `Microsoft.Win32.Registry` (built into `net8.0-windows`) for locating
-  the fallback browser.
+  MSB3277 and ~35 MB). Everything else comes from the BCL: `System.IO.Pipes`
+  for the single-instance hand-off, `FileSystemWatcher` for change detection, `Mutex` for
+  single-instance, `Microsoft.Win32.Registry` (built into `net8.0-windows`, still used by
+  the dormant browser-discovery code that W5 deletes).
 - **Do not add a NuGet or CDN dependency inside a worker sandbox** — it has no
   registry or network access and the restore will fail. Report it via Blocker and let
   the PM add it first (Standard §14).
@@ -56,10 +57,13 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
 
 ## Hard rules
 
-- **Bind the local server to `127.0.0.1` only, never `0.0.0.0` or `+`.** This serves
-  the contents of arbitrary local files; exposing it on a LAN interface is a real
-  disclosure bug. `HttpListener` on a non-loopback prefix also requires admin, which
-  would break a normal-user install.
+- **No network listener.** *(Rewritten 2026-10-11 for `W3A-PIPE`; this rule used to
+  govern the loopback HTTP server, which is gone.)* Pages are answered in-process
+  (`WebResourceRequested`); never reintroduce a socket. The one cross-process channel is
+  the hand-off pipe, and it must stay **current-user-only** (`PipeOptions.CurrentUserOnly`,
+  name carries the session and user SID), **bounded** (length cap checked before reading
+  the payload, a per-client read timeout), and **never trusted for more than a path**,
+  which goes through the same validation as any opened file.
 - **Serve only files explicitly opened by the user.** Map an opaque document id to an
   absolute path in an in-process table and serve only ids present in that table.
   Never take a filesystem path from the query string and read it — that is a path
@@ -157,8 +161,8 @@ Two constraints, both measured, both non-obvious:
 Honest "unverified on Windows" is correct and expected here. A false "works" is the
 one unacceptable answer.
 
-**The Codex sandbox cannot bind a loopback socket** (`HttpListenerException (13):
-Permission denied`). Anything needing a live HTTP or SSE check must be escalated to
-the PM, who can bind `127.0.0.1` and will run the suite. Do not silently downgrade
-such a check to a build-only result, and do not invent its output — escalating with
-the implementation finished is the correct outcome, and is what happened on S2.
+**A worker sandbox cannot bind sockets or create named pipes** (`HttpListenerException (13)`
+before W3a; `Permission denied` creating a pipe in `W3A-PIPE`). Anything needing a live
+pipe or socket check must be escalated to the PM, who runs the suite. Do not silently
+downgrade such a check to a build-only result, and do not invent its output —
+escalating with the implementation finished is the correct outcome.

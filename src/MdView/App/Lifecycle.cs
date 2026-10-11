@@ -4,7 +4,8 @@ namespace MdView.App;
 
 public sealed class Lifecycle : IDisposable
 {
-    private readonly ReaderServer server;
+    private readonly DocumentHost host;
+    private readonly IDisposable handOffServer;
     private readonly ILifecycleSignals signals;
     private readonly InstanceCoordinator coordinator;
     private readonly IBrowserLauncher browserLauncher;
@@ -23,7 +24,8 @@ public sealed class Lifecycle : IDisposable
     private bool shuttingDown;
 
     public Lifecycle(
-        ReaderServer server,
+        DocumentHost host,
+        IDisposable handOffServer,
         ILifecycleSignals signals,
         InstanceCoordinator coordinator,
         IBrowserLauncher browserLauncher,
@@ -31,11 +33,12 @@ public sealed class Lifecycle : IDisposable
         TimeSpan? startupTimeout = null,
         Action<string>? reportMessage = null)
     {
-        this.server = server;
+        this.host = host;
+        this.handOffServer = handOffServer;
         this.signals = signals;
         this.coordinator = coordinator;
         this.browserLauncher = browserLauncher;
-        this.gracePeriod = gracePeriod ?? TimeSpan.FromSeconds(8);
+        this.gracePeriod = gracePeriod ?? TimeSpan.Zero;
         this.startupTimeout = startupTimeout ?? TimeSpan.FromSeconds(30);
         this.reportMessage = reportMessage;
 
@@ -45,10 +48,13 @@ public sealed class Lifecycle : IDisposable
         signals.ModalCommandStarted += OnModalCommandStarted;
         signals.ModalCommandCompleted += OnModalCommandCompleted;
         signals.ExitRequested += OnExitRequested;
-        lock (gate) ArmGraceIfIdle();
+        // Give the initial launch the same bounded setup window as every later launch.
+        // A zero production grace must not race TryLaunch immediately after construction.
+        lock (gate) graceTimer = StartTimer(this.startupTimeout, GraceExpired);
     }
 
     public Task Completion => completion.Task;
+    internal bool IsShuttingDown { get { lock (gate) return shuttingDown; } }
 
     public bool TryLaunch(RegisteredDocument document)
     {
@@ -100,17 +106,31 @@ public sealed class Lifecycle : IDisposable
             pendingLaunches.Clear();
         }
 
-        signals.ClientConnected -= OnClientConnected;
-        signals.ClientDisconnected -= OnClientDisconnected;
-        signals.DocumentOpened -= OnDocumentOpened;
-        signals.ModalCommandStarted -= OnModalCommandStarted;
-        signals.ModalCommandCompleted -= OnModalCommandCompleted;
-        signals.ExitRequested -= OnExitRequested;
-        coordinator.DeleteHandshake();
-        server.Dispose();
-        coordinator.Dispose();
-        completion.TrySetResult();
+        try
+        {
+            try
+            {
+                signals.ClientConnected -= OnClientConnected;
+                signals.ClientDisconnected -= OnClientDisconnected;
+                signals.DocumentOpened -= OnDocumentOpened;
+                signals.ModalCommandStarted -= OnModalCommandStarted;
+                signals.ModalCommandCompleted -= OnModalCommandCompleted;
+                signals.ExitRequested -= OnExitRequested;
+            }
+            catch (Exception exception) { ReportShutdownFailure("disconnect lifecycle signals", exception); }
+
+            try { handOffServer.Dispose(); }
+            catch (Exception exception) { ReportShutdownFailure("stop hand-offs", exception); }
+            try { host.Dispose(); }
+            catch (Exception exception) { ReportShutdownFailure("dispose document host", exception); }
+            try { coordinator.Dispose(); }
+            catch (Exception exception) { ReportShutdownFailure("release the single-instance mutex", exception); }
+        }
+        finally { completion.TrySetResult(); }
     }
+
+    private void ReportShutdownFailure(string operation, Exception exception) =>
+        reportMessage?.Invoke($"mdview could not {operation}: {exception.Message}");
 
     private string DocumentUrl(RegisteredDocument document) =>
         $"{DocumentHost.Origin}/d/{Uri.EscapeDataString(document.Id)}";
@@ -119,8 +139,13 @@ public sealed class Lifecycle : IDisposable
 
     private void OnDocumentOpened(RegisteredDocument document)
     {
+        _ = TryAcceptHandOff(document);
+    }
+
+    public bool TryAcceptHandOff(RegisteredDocument document)
+    {
         var ticket = BeginLaunch(implicitResolution: browserLauncher is not IQueuedWindowLauncher);
-        if (ticket is null) return;
+        if (ticket is null) return false;
 
         var url = DocumentUrl(document);
         if (browserLauncher is IQueuedWindowLauncher queued)
@@ -141,6 +166,8 @@ public sealed class Lifecycle : IDisposable
                 }
             });
         }
+
+        return true;
     }
 
     /// <summary>
@@ -266,6 +293,7 @@ public sealed class Lifecycle : IDisposable
     {
         try
         {
+            await Task.Yield();
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             callback();
         }

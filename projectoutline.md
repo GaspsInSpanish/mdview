@@ -65,7 +65,8 @@ mdview.exe  --- Mutex "Local\mdview-singleton" already held? ---+
 | `MarkdownRenderer` | The one `DocumentKind` implemented in v1: Markdig pipeline + URI sanitizer |
 | `DocumentRegistry` | Opaque id ⇄ absolute path. **The security boundary** — only registered ids are servable |
 | `DocumentHost` | v1.4 (`W2A-HOST`): every request the page makes (`/d`, `/open`, `/toggle`, `/theme`, `/command`, `/source`, `/render`, `/save`), transport-agnostic: `HandleAsync(HostRequest) -> HostResponse`. Owns the registry, watchers, echo suppression, write token, and the origin + token checks. Raises `DocumentChanged`/`ThemeChanged` for whichever transport pushes events. Per-route body caps (`MaximumBodyBytes`: 64 MiB edit routes, 64 KiB others) |
-| `ReaderServer` | Since W2b: loopback listener for one route, `POST /open` (a second launch hands its path over). Refuses any request carrying an `Origin` header (a browser page) and every other route before reading the body. Deleted in W3 |
+| ~~`ReaderServer`~~ | **Deleted in W3a.** Was: loopback listener for one route, `POST /open` (a second launch hands its path over). Refuses any request carrying an `Origin` header (a browser page) and every other route before reading the body. Deleted in W3 |
+| `HandOffPipeServer` / `HandOffPipeClient` | W3a: single-instance hand-off. Current-user-only named pipe `mdview-<session>-<SID>`, 4-byte length + UTF-8 path, cap checked before reading, 2 s per client, listener pre-created per connection; refuses hand-offs once shutdown has begun. Warns only when creation fails for 4 s or more |
 | `InProcessRequestAdapter` / `InProcessRequestFlow` | W2b: the window's `WebResourceRequested` path into `DocumentHost`. Body read synchronously on the UI thread, host awaited without leaving it (WebView2 only accepts the response there), deferral completed on every path, `CompleteResponse` after delivery |
 | `DocumentEditService` | Edit mode's write path: decode (UTF-8 only is editable), hash-checked save, BOM restore, atomic replace |
 | `FileWatcher` | `FileSystemWatcher` per open doc, debounced, pushes reload over SSE |
@@ -331,7 +332,8 @@ before: WinForms costs +34.8 MB).
 | W1 | Own window. Replace the browser launch with an mdview window hosting WebView2, still pointed at today's loopback server. Nothing else moves, so every probe stays valid | Medium | Build only |
 | W2a | Transport-agnostic `DocumentHost`: all request handling moves out of `ReaderServer`, which becomes a thin HTTP/SSE adapter. Pure refactor; the existing HTTP suites, unmodified, are the acceptance test | **High** | Yes, fully |
 | W2b | Drop the server for pages. Windows answer the page's requests in-process via `WebResourceRequested` on `DocumentHost` (origin + token checks kept), and `reload`/`theme` are pushed into the window. Lifecycle is fed by window open/close instead of SSE clients. The HTTP listener shrinks to `/open` forwarding only. **The browser fallback goes** (it needs a page server): without WebView2, mdview shows Microsoft's download link until W5's installer bootstraps the runtime | **High** | Host side partly (in-process suites), window side via Windows black-box |
-| W3 | Desktop lifecycle. A second launch hands its path over a named pipe and the last HTTP listener is deleted; exit as soon as the last window closes, with no grace period. Remember window size and position; drag a `.md` onto a window to open it | **High** | No |
+| W3a | Hand-off without a server. A second launch passes its path to the running instance over a **current-user-only named pipe**; `ReaderServer`, the loopback listener and the `instance.json` handshake are deleted. The process exits **as soon as** the last window closes and no launch is pending (no grace period). Because that opens a race (a hand-off arriving while the primary exits), a secondary whose hand-off fails retries and **becomes the primary** once the mutex is free | **High** | Mostly (pipes work in WSL; the Windows run covers the rest) |
+| W3b | Window size and position remembered in `config.json` (restored clamped to a visible monitor), and dragging a `.md` onto a window opens it | Medium | No (owner's hands) |
 | W4 | Win98 frame. Borderless-with-resize window, in-page title bar with drag region and caption buttons, maximize/restore state, active/inactive title colours, DPI | **High** | Title-bar geometry yes (`GeometryProbe`), window behaviour no |
 | W5 | Installer. Detect the WebView2 runtime and bootstrap it if missing; retire `browserPath`/`bravePath` and the browser-launch code (dead since W2b). The WebView2 profile already lives in `%LOCALAPPDATA%\mdview\WebView2` (W1) | Medium | CI only |
 
@@ -368,6 +370,13 @@ Codex to a Claude worker after two rounds (§9). Accepted residuals: cancelling 
 Exit at an unsaved-edits prompt leaves launches requested in the preceding second
 abandoned (re-open the file); a first window whose page fails to load closes silently
 after the startup timeout.
+
+**W3a accepted 2026-10-11, not yet released.** Named-pipe hand-off (current user only, SID +
+session in the name, 32 KiB cap before reading, 2 s per client, multi-instance listener with
+creation retried), `ReaderServer` and `instance.json` deleted, no network listener left; exit as
+soon as the last window closes (0.3 s measured); a secondary whose hand-off fails takes over when
+the primary's mutex frees. Windows black-box 15/15, including two bursts of five simultaneous
+launches.
 
 Each packet ships as its own release, so a regression is always one step back.
 Everything in the "No" column gets a precise click-list for the owner, per
