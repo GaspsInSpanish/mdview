@@ -23,18 +23,9 @@ still running will keep opening your files.
 mdview draws its window with Microsoft **WebView2**, which comes with Windows 11 and is
 installed on most up-to-date Windows 10 PCs. Nothing else is needed: no browser opens.
 
-If WebView2 is missing, mdview falls back to opening the document in a browser window
-instead, trying **Brave**, then **Google Chrome**, then **Microsoft Edge**, then your
-default browser, and tells you it did so. To choose that fallback browser yourself,
-create `%APPDATA%\mdview\config.json`:
-
-```json
-{
-  "browserPath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-}
-```
-
-(The older `bravePath` setting still works.)
+If WebView2 is missing, mdview says so when you open a document and offers to open
+Microsoft's download page. Install the **Evergreen Runtime** from there and open the
+document again.
 
 ## Reading
 

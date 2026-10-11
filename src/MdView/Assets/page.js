@@ -8,12 +8,14 @@
   };
 
   if (window.mdviewToggle.id) {
-    const events = new EventSource(`/events/${encodeURIComponent(window.mdviewToggle.id)}`);
-    // Unsaved edits outrank a reload; edit mode flags the file as changed on disk instead.
-    events.addEventListener('reload', () => {
-      if (!window.mdviewEdit?.onExternalChange?.()) location.reload();
+    window.chrome?.webview?.addEventListener('message', event => {
+      if (event.data?.type === 'reload') {
+        // Unsaved edits outrank a reload; edit mode flags the file as changed on disk instead.
+        if (!window.mdviewEdit?.onExternalChange?.()) location.reload();
+      } else if (event.data?.type === 'theme') {
+        window.mdviewApplyTheme(event.data.theme);
+      }
     });
-    events.addEventListener('theme', event => window.mdviewApplyTheme(event.data));
   }
 
   document.addEventListener('change', async event => {

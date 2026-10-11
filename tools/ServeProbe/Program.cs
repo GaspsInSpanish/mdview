@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -48,9 +49,14 @@ if (args.Length == 1 && args[0] == "--edit")
     return await RunEditChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--transport")
+{
+    return await RunTransportChecksAsync();
+}
+
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit | ServeProbe --browser | ServeProbe --limits");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit | ServeProbe --transport | ServeProbe --browser | ServeProbe --limits");
     return 1;
 }
 
@@ -86,6 +92,92 @@ static async Task<int> RunToggleChecksAsync()
     failed |= !await RunCheckAsync("echo-suppression-and-external-reload", CheckEchoSuppressionAsync);
     failed |= !await RunCheckAsync("one-based-line-numbers", CheckLineNumbersAsync);
     failed |= !await RunCheckAsync("uri-sanitizer-regression", CheckUriSanitizerAsync);
+    return failed ? 1 : 0;
+}
+
+static async Task<int> RunTransportChecksAsync()
+{
+    // Reload/theme delivery through chrome.webview and page.js requires the PM's Windows black-box run.
+    var failed = false;
+    failed |= !await RunCheckAsync("transport-body-cap", async () =>
+    {
+        using var host = new DocumentHost(() => DocumentHost.Origin);
+        var adapter = new InProcessRequestAdapter(host);
+        var response = await adapter.HandleAsync("POST", new Uri($"{DocumentHost.Origin}/toggle"),
+            DocumentHost.Origin, new byte[DocumentHost.MaximumStandardBodyBytes + 1]);
+        Ensure(response.StatusCode == 413, "The adapter did not reject a body over its route cap.");
+    });
+    failed |= !await RunCheckAsync("transport-origin-and-headers", async () =>
+    {
+        var directory = CreateProbeDirectory("transport");
+        try
+        {
+            var path = Path.Combine(directory, "page.md");
+            await File.WriteAllTextAsync(path, "# page\n");
+            using var host = new DocumentHost(() => DocumentHost.Origin);
+            var document = host.RegisterDocument(path);
+            var adapter = new InProcessRequestAdapter(host);
+            var response = await adapter.HandleAsync("GET", new Uri($"{DocumentHost.Origin}/d/{document.Id}"),
+                null, []);
+            var headers = InProcessRequestAdapter.BuildHeaderString(response);
+            Ensure(headers.Contains("Content-Security-Policy: ", StringComparison.Ordinal),
+                "The transport header string omitted the CSP header.");
+            var noContentHeaders = InProcessRequestAdapter.BuildHeaderString(
+                new HostResponse(204, "", [], new Dictionary<string, string>()));
+            Ensure(!noContentHeaders.Contains("Content-Type:", StringComparison.Ordinal),
+                "The transport emitted an empty Content-Type header for a 204 response.");
+            var noOrigin = await adapter.HandleAsync("POST", new Uri($"{DocumentHost.Origin}/theme"), null,
+                "{}"u8.ToArray());
+            Ensure(noOrigin.StatusCode == 403, "A missing Origin was not passed to the host as null.");
+            var open = await adapter.HandleAsync("POST", new Uri($"{DocumentHost.Origin}/open"), null, []);
+            Ensure(open.StatusCode == 404, "The in-process transport exposed the HTTP-only /open route.");
+        }
+        finally { TryDeleteDirectory(directory); }
+    });
+    failed |= !await RunCheckAsync("transport-complete-after-delivery", async () =>
+    {
+        await using var fixture = await ToggleFixture.CreateAsync("# exit\n");
+        var exited = false;
+        fixture.Server.Host.ExitRequested += () => exited = true;
+        var adapter = new InProcessRequestAdapter(fixture.Server.Host);
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { command = "file.exit", token = fixture.Token });
+        await InProcessRequestFlow.RunAsync(
+            () => adapter.HandleAsync("POST", new Uri($"{DocumentHost.Origin}/command/{fixture.Id}"),
+                DocumentHost.Origin, body),
+            _ => Ensure(!exited, "CompleteResponse ran before response delivery."),
+            () => Ensure(!exited, "CompleteResponse ran before deferral completion."),
+            fixture.Server.Host.CompleteResponse);
+        Ensure(exited, "CompleteResponse did not run after response delivery.");
+    });
+    failed |= !await RunCheckAsync("transport-deferral-completed-when-handler-throws", async () =>
+    {
+        var completed = false;
+        try
+        {
+            await InProcessRequestFlow.RunAsync(
+                () => throw new InvalidOperationException("handler failed"),
+                _ => { }, () => completed = true, _ => { });
+        }
+        catch (InvalidOperationException) { }
+        Ensure(completed, "A throwing handler left the WebView2 deferral uncompleted, so the page request would hang.");
+    });
+    failed |= !await RunCheckAsync("transport-ui-context-delivery", async () =>
+    {
+        using var context = new PumpSynchronizationContext();
+        var callingThread = Environment.CurrentManagedThreadId;
+        await context.RunAsync(() => InProcessRequestFlow.RunAsync(
+            async () =>
+            {
+                await Task.Delay(20);
+                return new HostResponse(204, "", [], new Dictionary<string, string>());
+            },
+            _ => Ensure(Environment.CurrentManagedThreadId == callingThread,
+                "Response delivery resumed off the calling synchronization-context thread."),
+            () => Ensure(Environment.CurrentManagedThreadId == callingThread,
+                "Deferral completion resumed off the calling synchronization-context thread."),
+            _ => Ensure(Environment.CurrentManagedThreadId == callingThread,
+                "Host completion resumed off the calling synchronization-context thread.")));
+    });
     return failed ? 1 : 0;
 }
 
@@ -126,7 +218,7 @@ static async Task<int> RunLimitChecksAsync()
 {
     var failed = false;
     failed |= !await RunCheckAsync("limits-unknown-route-answers-without-reading", CheckUnknownRouteUnreadAsync);
-    failed |= !await RunCheckAsync("limits-wrong-origin-answers-without-reading", CheckWrongOriginUnreadAsync);
+    failed |= !await RunCheckAsync("limits-wrong-origin-host-boundary", CheckWrongOriginUnreadAsync);
     failed |= !await RunCheckAsync("limits-declared-oversize-refused-unread", CheckDeclaredOversizeAsync);
     failed |= !await RunCheckAsync("limits-small-routes-capped", CheckSmallRouteCapAsync);
     return failed ? 1 : 0;
@@ -154,6 +246,7 @@ static async Task<int?> StatusWithoutBodyAsync(int port, string method, string p
 static async Task CheckUnknownRouteUnreadAsync()
 {
     await using var fixture = await ToggleFixture.CreateAsync("text\n");
+    fixture.StartListener();
     var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/anything", null, 500_000_000);
     Ensure(status == 404, $"An unknown route with a 500 MB declared body answered {status?.ToString() ?? "nothing within 3 s"}, not 404 without reading it.");
 }
@@ -163,18 +256,29 @@ static async Task CheckWrongOriginUnreadAsync()
     await using var fixture = await ToggleFixture.CreateAsync("text\n");
     foreach (var path in new[] { "/toggle", "/theme", $"/command/{fixture.Id}", $"/save/{fixture.Id}" })
     {
-        var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", path, "https://evil.example", 1_000);
-        Ensure(status == 403, $"{path} from a foreign origin answered {status?.ToString() ?? "nothing within 3 s"}, not 403 before reading the body.");
+        var response = await fixture.Server.Host.HandleAsync(new HostRequest("POST", path,
+            "https://evil.example", "{}"u8.ToArray()));
+        Ensure(response.StatusCode == 403, $"{path} from a foreign origin answered {response.StatusCode}, not 403 at the host boundary.");
     }
+    fixture.StartListener();
+    var routes = new[] { ("GET", $"/d/{fixture.Id}"), ("GET", $"/events/{fixture.Id}"),
+        ("POST", "/toggle"), ("POST", "/theme"), ("POST", $"/command/{fixture.Id}"),
+        ("POST", $"/save/{fixture.Id}") };
+    foreach (var (method, path) in routes)
+        Ensure(await StatusWithoutBodyAsync(fixture.Server.Port, method, path, null, method == "POST" ? 1_000 : 0) == 404,
+            $"{method} {path} was not 404 over the hand-off listener.");
+    Ensure(await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/open", "https://evil.example", 1_000) == 403,
+        "POST /open with an Origin header was not rejected before reading its body.");
 }
 
 static async Task CheckDeclaredOversizeAsync()
 {
     await using var fixture = await ToggleFixture.CreateAsync("text\n");
-    var origin = $"http://127.0.0.1:{fixture.Server.Port}";
-    var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", $"/save/{fixture.Id}", origin, 64L * 1024 * 1024 + 1);
-    Ensure(status == 413, $"A save declaring 64 MiB + 1 answered {status?.ToString() ?? "nothing within 3 s"}, not 413 without reading.");
-    status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/open", null, 500_000_000);
+    var save = await fixture.Server.Host.HandleAsync(new HostRequest("POST", $"/save/{fixture.Id}",
+        DocumentHost.Origin, new byte[DocumentHost.MaximumEditBodyBytes + 1]));
+    Ensure(save.StatusCode == 413, $"A save of 64 MiB + 1 answered {save.StatusCode}, not 413 at the host boundary.");
+    fixture.StartListener();
+    var status = await StatusWithoutBodyAsync(fixture.Server.Port, "POST", "/open", null, 500_000_000);
     Ensure(status == 413, $"/open declaring 500 MB answered {status?.ToString() ?? "nothing within 3 s"}, not 413 without reading.");
 }
 
@@ -182,12 +286,9 @@ static async Task CheckSmallRouteCapAsync()
 {
     await using var fixture = await ToggleFixture.CreateAsync("- [ ] task\n");
     var padded = JsonSerializer.Serialize(new { id = fixture.Id, line = 1, @checked = false, token = fixture.Token, pad = new string('x', 70 * 1024) });
-    using var client = new HttpClient();
-    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{fixture.Server.Port}/toggle");
-    request.Headers.Add("Origin", $"http://127.0.0.1:{fixture.Server.Port}");
-    request.Content = new StringContent(padded, Encoding.UTF8, "application/json");
-    using var response = await client.SendAsync(request);
-    Ensure(response.StatusCode == HttpStatusCode.RequestEntityTooLarge, $"A 70 KiB toggle body answered {(int)response.StatusCode}, not 413.");
+    var response = await fixture.Server.Host.HandleAsync(new HostRequest("POST", "/toggle", DocumentHost.Origin,
+        Encoding.UTF8.GetBytes(padded)));
+    Ensure(response.StatusCode == (int)HttpStatusCode.RequestEntityTooLarge, $"A 70 KiB toggle body answered {response.StatusCode}, not 413.");
     EnsureBytes(fixture.Path, "- [ ] task\n");
     EnsureStatus(await fixture.ToggleAsync(1, false), HttpStatusCode.NoContent);
 }
@@ -455,8 +556,8 @@ static async Task CheckFileCommandAllowlistAsync()
         await using var fixture = await ToggleFixture.CreateAsync("# Current\n", fileDialogs: dialogs);
         var opened = 0;
         var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        fixture.Server.DocumentOpened += _ => opened++;
-        fixture.Server.ExitRequested += () => exited.TrySetResult();
+        fixture.Server.Host.DocumentOpened += _ => opened++;
+        fixture.Server.Host.ExitRequested += () => exited.TrySetResult();
 
         EnsureStatus((await fixture.CommandAsync("file.open")).StatusCode, HttpStatusCode.NoContent);
         var save = await fixture.CommandAsync("file.save-as");
@@ -546,7 +647,7 @@ static async Task CheckNewAndCancelAsync()
         dialogs.SaveResults.Enqueue(newWithoutExtension);
         await using var fixture = await ToggleFixture.CreateAsync("# Existing\n", fileDialogs: dialogs);
         RegisteredDocument? opened = null;
-        fixture.Server.DocumentOpened += document => opened = document;
+        fixture.Server.Host.DocumentOpened += document => opened = document;
         EnsureStatus((await fixture.CommandAsync("file.new")).StatusCode, HttpStatusCode.NoContent);
         Ensure(File.Exists(newWithoutExtension + ".md") && new FileInfo(newWithoutExtension + ".md").Length == 0,
             "New did not create an empty .md file.");
@@ -571,13 +672,17 @@ static async Task CheckModalLifecycleHoldAsync()
     await using var fixture = await ToggleFixture.CreateAsync("# Long dialog\n", fileDialogs: dialogs);
     var stateDirectory = CreateProbeDirectory("modal-lifecycle");
     using var coordinator = new InstanceCoordinator(stateDirectory);
-    using var lifecycle = new Lifecycle(fixture.Server, coordinator, new StubBrowserLauncher(),
+    var launcher = new StubBrowserLauncher();
+    var signals = new StubLifecycleSignals(fixture.Server.Host, launcher);
+    using var lifecycle = new Lifecycle(fixture.Server, signals, coordinator, launcher,
         TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(3));
+    signals.Connect();
     var events = await fixture.ConnectEventsAsync();
     var command = fixture.CommandAsync("file.save-as");
     await dialogs.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
     _ = await fixture.FetchHtmlAsync();
     await events.DisposeAsync();
+    signals.Disconnect();
     await Task.Delay(TimeSpan.FromMilliseconds(800));
     Ensure(!lifecycle.Completion.IsCompleted, "Lifecycle shut down while a simulated long dialog was open.");
     dialogs.Block.TrySetResult();
@@ -1056,15 +1161,156 @@ static async Task<int> RunLifecycleChecksAsync(string path)
     await CheckLastDisconnectAsync(path);
     await CheckGraceCancellationAsync(path);
     await CheckDocumentOpenDuringGraceAsync(path);
+    await CheckAbandonedExpectedWindowAsync(path);
     await CheckStartupGuardAsync(path);
+    await CheckSatisfiedByExistingThenModalAsync(path);
+    await CheckDoubleResolutionAsync(path);
+    await CheckLaunchTimeoutAsync(path);
+    CheckOpeningDocumentGuard();
+    CheckLaunchFailureClassification();
+    CheckPendingLaunchSet();
+    await CheckExitWithPendingLaunchAsync(path);
     return 0;
+}
+
+// N1: re-opening an open file resolves as SatisfiedByExisting; a later modal command must not leave the
+// process waiting for a window that was never going to connect.
+static async Task CheckSatisfiedByExistingThenModalAsync(string path)
+{
+    var fixture = StartFixture(path, TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(30));
+    fixture.Signals.Connect();
+    fixture.Signals.ExpectAdditionalWindow(fixture.Server.RegisterDocument(path));
+    fixture.Launcher.Resolve(1, LaunchOutcome.SatisfiedByExisting);
+    fixture.Signals.StartModal();
+    fixture.Signals.CompleteModal();
+    await Task.Delay(TimeSpan.FromMilliseconds(600));
+    Ensure(!fixture.Lifecycle.Completion.IsCompleted, "Lifecycle exited while a window was still connected.");
+    fixture.Signals.Disconnect();
+    await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(2));
+    Console.WriteLine("satisfied-by-existing-then-modal=passed exited-after-last-close=true");
+    fixture.Dispose();
+}
+
+// A launch resolved twice (abandon, then a late failure) must release exactly one expectation.
+static async Task CheckDoubleResolutionAsync(string path)
+{
+    var fixture = StartFixture(path, TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(30));
+    fixture.Signals.Connect();
+    fixture.Signals.ExpectAdditionalWindow(fixture.Server.RegisterDocument(path));
+    fixture.Signals.ExpectAdditionalWindow(fixture.Server.RegisterDocument(path));
+    Ensure(fixture.Launcher.Resolve(1, LaunchOutcome.Abandoned), "First resolution was refused.");
+    Ensure(!fixture.Launcher.Resolve(1, LaunchOutcome.Abandoned), "A launch resolved twice.");
+    fixture.Signals.Disconnect();
+    await Task.Delay(TimeSpan.FromMilliseconds(800));
+    Ensure(!fixture.Lifecycle.Completion.IsCompleted,
+        "A double-resolved launch released another in-flight launch's expectation.");
+    fixture.Launcher.Resolve(2, LaunchOutcome.Abandoned);
+    await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(2));
+    Console.WriteLine("double-resolution=passed other-launch-held-shutdown=true");
+    fixture.Dispose();
+}
+
+// A launch that never resolves on its own is abandoned by its timeout, after which the process exits.
+static async Task CheckLaunchTimeoutAsync(string path)
+{
+    var fixture = StartFixture(path, TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(1));
+    fixture.Signals.Connect();
+    fixture.Signals.ExpectAdditionalWindow(fixture.Server.RegisterDocument(path));
+    fixture.Signals.Disconnect();
+    await Task.Delay(TimeSpan.FromMilliseconds(500));
+    Ensure(!fixture.Lifecycle.Completion.IsCompleted, "Exited before the pending launch timed out.");
+    await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(3));
+    Ensure(fixture.Launcher.Tickets[1].Outcome == LaunchOutcome.Abandoned, "The timed-out launch was not abandoned.");
+    Ensure(fixture.Launcher.Tickets[1].WhenAbandoned.IsCancellationRequested, "The launcher was not told to give up.");
+    Console.WriteLine("launch-timeout=passed abandoned-then-exited=true");
+    fixture.Dispose();
+}
+
+// N3: a request that finds the document already opening must not release the first request's claim.
+static void CheckOpeningDocumentGuard()
+{
+    var guard = new OpeningDocumentGuard();
+    using var first = guard.TryEnter("doc") ?? throw new InvalidOperationException("First claim refused.");
+    Ensure(guard.TryEnter("doc") is null, "A second claim on an opening document was granted.");
+    Ensure(guard.TryEnter("doc") is null, "A third claim was granted after a refused second claim.");
+    Ensure(guard.IsOpening("doc"), "The first claim was released by a refused request.");
+    first.Dispose();
+    Ensure(!guard.IsOpening("doc"), "The owner's release did not free the document.");
+    using var again = guard.TryEnter("doc");
+    Ensure(again is not null, "The document could not be claimed after release.");
+    Console.WriteLine("opening-document-guard=passed");
+}
+
+// R1: only runtime/environment/controller failures (and the first launch's timeout) offer the download prompt.
+static void CheckLaunchFailureClassification()
+{
+    Ensure(LaunchMessages.Classify(LaunchMessages.RuntimeUnavailable) == LaunchFailurePrompt.RuntimeDownload,
+        "A runtime failure did not offer the download prompt.");
+    Ensure(LaunchMessages.RuntimePrompt.StartsWith(LaunchMessages.RuntimeUnavailable, StringComparison.Ordinal) &&
+        LaunchMessages.RuntimePrompt.EndsWith("Open the download page?", StringComparison.Ordinal),
+        "The runtime prompt text drifted from the required wording.");
+    Ensure(LaunchMessages.Classify(LaunchMessages.QueuedTimeout) == LaunchFailurePrompt.Warning,
+        "A queued timeout claimed the runtime was missing.");
+    Ensure(LaunchMessages.Classify("mdview could not open the window: x") == LaunchFailurePrompt.Warning,
+        "A non-runtime failure offered the download prompt.");
+    Console.WriteLine("launch-failure-classification=passed");
+}
+
+// R2: File → Exit aborts launches still being set up.
+static void CheckPendingLaunchSet()
+{
+    var set = new PendingLaunchSet();
+    var aborted = new List<int>();
+    var first = set.Register(() => aborted.Add(1));
+    set.Register(() => throw new InvalidOperationException("abort failed"));
+    set.Register(() => aborted.Add(3));
+    var finished = set.Register(() => aborted.Add(4));
+    finished.Dispose();
+    first.Dispose();
+    Ensure(set.Count == 2, "Disposing a registration did not remove it.");
+    set.AbortAll();
+    Ensure(aborted.SequenceEqual([3]), "AbortAll did not abort exactly the live registrations past a failing one.");
+    var live = new PendingLaunchSet();
+    var ran = false;
+    live.Register(() => ran = true);
+    live.AbortAll();
+    Ensure(ran, "AbortAll did not run a registered abort.");
+    Console.WriteLine("pending-launch-set=passed");
+}
+
+static async Task CheckExitWithPendingLaunchAsync(string path)
+{
+    var fixture = StartFixture(path, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    fixture.Signals.Connect();
+    fixture.Signals.ExpectAdditionalWindow(fixture.Server.RegisterDocument(path));
+    Ensure(!fixture.Launcher.Tickets[1].IsResolved, "The second launch resolved before exit.");
+    fixture.Signals.RequestExit();
+    await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(2));
+    Ensure(fixture.Launcher.Tickets[1].Outcome == LaunchOutcome.Abandoned, "Exit left a pending launch unresolved.");
+    Console.WriteLine("exit-with-pending-launch=passed pending-launch-aborted=true");
+    fixture.Dispose();
+}
+
+static async Task CheckAbandonedExpectedWindowAsync(string path)
+{
+    var fixture = StartFixture(path, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(500));
+    fixture.Signals.Connect();
+    fixture.Signals.ExpectAdditionalWindow(fixture.Server.RegisterDocument(path));
+    fixture.Signals.Abandon();
+    await Task.Delay(TimeSpan.FromMilliseconds(700));
+    Ensure(!fixture.Lifecycle.Completion.IsCompleted,
+        "Abandoning an unconnected second window shut down while the first window was connected.");
+    fixture.Signals.Disconnect();
+    await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(3));
+    Console.WriteLine("abandoned-window=passed last-connected-close-exited=true");
+    fixture.Dispose();
 }
 
 static async Task CheckLastDisconnectAsync(string path)
 {
     var fixture = StartFixture(path, TimeSpan.FromMilliseconds(300), TimeSpan.FromSeconds(10));
-    using var client = await ConnectAsync(fixture.Url);
-    client.Dispose();
+    fixture.Signals.Connect();
+    fixture.Signals.Disconnect();
     await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(8));
     Console.WriteLine($"last-disconnect=passed handshake-deleted={!File.Exists(fixture.HandshakePath)}");
     fixture.Dispose();
@@ -1074,14 +1320,12 @@ static async Task CheckGraceCancellationAsync(string path)
 {
     var fixture = StartFixture(path, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10));
     var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    fixture.Server.ClientDisconnected += () => disconnected.TrySetResult();
-    using (var first = await ConnectAsync(fixture.Url))
-    {
-        first.Dispose();
-    }
+    fixture.Signals.ClientDisconnected += () => disconnected.TrySetResult();
+    fixture.Signals.Connect();
+    fixture.Signals.Disconnect();
 
     await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(7));
-    using var second = await ConnectAsync(fixture.Url);
+    fixture.Signals.Connect();
     await Task.Delay(TimeSpan.FromMilliseconds(2300));
     if (fixture.Lifecycle.Completion.IsCompleted)
     {
@@ -1107,44 +1351,35 @@ static async Task CheckDocumentOpenDuringGraceAsync(string path)
 {
     var fixture = StartFixture(path, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(3));
     var disconnected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-    fixture.Server.ClientDisconnected += () => disconnected.TrySetResult();
-    using (var first = await ConnectAsync(fixture.Url))
-    {
-        first.Dispose();
-    }
+    fixture.Signals.ClientDisconnected += () => disconnected.TrySetResult();
+    fixture.Signals.Connect();
+    fixture.Signals.Disconnect();
 
     await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(7));
     await Task.Delay(TimeSpan.FromMilliseconds(750));
     var secondPath = Path.Combine(Path.GetDirectoryName(path)!, "mdview-lifecycle-second.md");
     await File.WriteAllTextAsync(secondPath, "# Second document\n");
-    var secondId = await OpenDocumentAsync(fixture.Server.Port, secondPath);
-    var secondUrl = $"http://127.0.0.1:{fixture.Server.Port}/d/{secondId}";
+    var openResponse = await fixture.Server.Host.HandleAsync(new HostRequest("POST", "/open", null,
+        Encoding.UTF8.GetBytes(secondPath)));
+    using var openJson = JsonDocument.Parse(openResponse.Body);
+    var secondId = openJson.RootElement.GetProperty("id").GetString()
+        ?? throw new InvalidOperationException("The open response did not contain an ID.");
+    var secondUrl = $"{DocumentHost.Origin}/d/{secondId}";
 
     await Task.Delay(TimeSpan.FromMilliseconds(600));
-    using var documentClient = new HttpClient();
-    if (fixture.Lifecycle.Completion.IsCompleted || (await documentClient.GetAsync(secondUrl)).StatusCode != HttpStatusCode.OK)
+    var page = await fixture.Server.Host.HandleAsync(new HostRequest("GET", $"/d/{secondId}", null, []));
+    if (fixture.Lifecycle.Completion.IsCompleted || page.StatusCode != (int)HttpStatusCode.OK)
     {
         throw new InvalidOperationException("Opening a document during grace did not keep the server alive.");
     }
 
-    using (var second = await ConnectAsync(secondUrl))
-    {
-        second.Dispose();
-    }
+    fixture.Signals.Connect();
+    fixture.Signals.Disconnect();
 
     await fixture.Lifecycle.Completion.WaitAsync(TimeSpan.FromSeconds(8));
     Console.WriteLine($"document-open-during-grace=passed handshake-deleted={!File.Exists(fixture.HandshakePath)}");
     fixture.Dispose();
-}
-
-static async Task<string> OpenDocumentAsync(int port, string path)
-{
-    using var client = new HttpClient();
-    using var response = await client.PostAsync($"http://127.0.0.1:{port}/open", new StringContent(path));
-    response.EnsureSuccessStatusCode();
-    using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-    return json.RootElement.GetProperty("id").GetString()
-        ?? throw new InvalidOperationException("The open response did not contain an ID.");
+    try { File.Delete(secondPath); } catch (IOException) { }
 }
 
 static Fixture StartFixture(string path, TimeSpan grace, TimeSpan startup)
@@ -1158,78 +1393,131 @@ static Fixture StartFixture(string path, TimeSpan grace, TimeSpan startup)
     }
 
     var server = new ReaderServer();
-    server.Start();
     var document = server.RegisterDocument(path);
-    coordinator.WriteHandshake(server.Port);
+    coordinator.WriteHandshake(7717);
     var launcher = new StubBrowserLauncher();
-    var lifecycle = new Lifecycle(server, coordinator, launcher, grace, startup);
+    var signals = new StubLifecycleSignals(server.Host, launcher);
+    var lifecycle = new Lifecycle(server, signals, coordinator, launcher, grace, startup);
     if (!lifecycle.TryLaunch(document) || launcher.Url is null ||
         !Uri.TryCreate(launcher.Url, UriKind.Absolute, out var uri) ||
-        uri.Scheme != Uri.UriSchemeHttp || uri.Host != IPAddress.Loopback.ToString() ||
-        uri.Port != server.Port || !uri.AbsolutePath.StartsWith("/d/", StringComparison.Ordinal))
+        uri.GetLeftPart(UriPartial.Authority) != DocumentHost.Origin ||
+        !uri.AbsolutePath.StartsWith("/d/", StringComparison.Ordinal))
     {
         lifecycle.Dispose();
         throw new InvalidOperationException("Stub launcher did not receive a valid loopback document URL.");
     }
 
     Console.WriteLine($"stub-url={launcher.Url}");
-    return new Fixture(server, lifecycle, coordinator.HandshakePath, stateDirectory, launcher.Url);
+    return new Fixture(server, signals, lifecycle, coordinator.HandshakePath, stateDirectory, launcher.Url, launcher);
 }
 
-static async Task<HttpResponseMessage> ConnectAsync(string documentUrl)
+sealed class StubBrowserLauncher : IBrowserLauncher, IQueuedWindowLauncher
 {
-    var document = new Uri(documentUrl);
-    var id = document.AbsolutePath[3..];
-    var client = new HttpClient();
-    try
-    {
-        var request = new HttpRequestMessage(HttpMethod.Get,
-            $"http://127.0.0.1:{document.Port}/events/{id}");
-        var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-        response.EnsureSuccessStatusCode();
-        return new OwnedResponse(response, client);
-    }
-    catch
-    {
-        client.Dispose();
-        throw;
-    }
-}
-
-sealed class StubBrowserLauncher : IBrowserLauncher
-{
+    internal List<LaunchTicket> Tickets { get; } = [];
     public string? Url { get; private set; }
+
     public bool TryLaunch(string url, out string? error)
     {
         Url = url;
         error = null;
         return true;
     }
+
+    public bool TryLaunch(string url, LaunchTicket ticket, out string? error)
+    {
+        Tickets.Add(ticket);
+        return TryLaunch(url, out error);
+    }
+
+    public void QueueLaunch(string url, LaunchTicket ticket, Action<string?> completed)
+    {
+        Tickets.Add(ticket);
+        pending.Register(() => ticket.Resolve(LaunchOutcome.Abandoned));
+    }
+
+    private readonly PendingLaunchSet pending = new();
+
+    public void RequestExit(Action shutdown)
+    {
+        pending.AbortAll();
+        shutdown();
+    }
+
+    internal bool Resolve(int index, LaunchOutcome outcome) => Tickets[index].Resolve(outcome);
+
+    // Mimics the real launcher: the oldest launch still waiting is the one whose window connects.
+    internal void ResolveOldest(LaunchOutcome outcome) => Tickets.FirstOrDefault(ticket => !ticket.IsResolved)?.Resolve(outcome);
 }
 
-sealed record Fixture(ReaderServer Server, Lifecycle Lifecycle, string HandshakePath,
-    string StateDirectory, string Url) : IDisposable
+sealed class StubLifecycleSignals : ILifecycleSignals
+{
+    private readonly StubBrowserLauncher launcher;
+
+    internal StubLifecycleSignals(DocumentHost host, StubBrowserLauncher launcher)
+    {
+        this.launcher = launcher;
+        host.DocumentOpened += value => DocumentOpened?.Invoke(value);
+        host.ModalCommandStarted += () => ModalCommandStarted?.Invoke();
+        host.ModalCommandCompleted += () => ModalCommandCompleted?.Invoke();
+        host.ExitRequested += () => ExitRequested?.Invoke();
+    }
+
+    public event Action? ClientConnected;
+    public event Action? ClientDisconnected;
+    public event Action<RegisteredDocument>? DocumentOpened;
+    public event Action? ModalCommandStarted;
+    public event Action? ModalCommandCompleted;
+    public event Action? ExitRequested;
+    internal void Connect()
+    {
+        ClientConnected?.Invoke();
+        launcher.ResolveOldest(LaunchOutcome.Connected);
+    }
+    internal void Disconnect() => ClientDisconnected?.Invoke();
+    internal void Abandon() => launcher.ResolveOldest(LaunchOutcome.Abandoned);
+    internal void RequestExit() => ExitRequested?.Invoke();
+    internal void StartModal() => ModalCommandStarted?.Invoke();
+    internal void CompleteModal() => ModalCommandCompleted?.Invoke();
+    internal void ExpectAdditionalWindow(RegisteredDocument document) => DocumentOpened?.Invoke(document);
+}
+
+sealed class PumpSynchronizationContext : SynchronizationContext, IDisposable
+{
+    private readonly BlockingCollection<(SendOrPostCallback Callback, object? State)> callbacks = [];
+
+    internal async Task RunAsync(Func<Task> action)
+    {
+        var previous = Current;
+        SetSynchronizationContext(this);
+        try
+        {
+            // Poll rather than block on Take(): when a continuation wrongly resumes off this context, no
+            // callback ever arrives, and a blocking Take() would hang the suite instead of failing it.
+            var task = action();
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (!task.IsCompleted)
+            {
+                if (DateTime.UtcNow > deadline)
+                    throw new TimeoutException("The flow never returned to the calling synchronization context.");
+                if (callbacks.TryTake(out var work, TimeSpan.FromMilliseconds(50)))
+                    work.Callback(work.State);
+            }
+            await task;
+        }
+        finally { SetSynchronizationContext(previous); }
+    }
+
+    public override void Post(SendOrPostCallback callback, object? state) => callbacks.Add((callback, state));
+    public void Dispose() => callbacks.Dispose();
+}
+
+sealed record Fixture(ReaderServer Server, StubLifecycleSignals Signals, Lifecycle Lifecycle, string HandshakePath,
+    string StateDirectory, string Url, StubBrowserLauncher Launcher) : IDisposable
 {
     public void Dispose()
     {
         Lifecycle.Dispose();
         try { Directory.Delete(StateDirectory, true); } catch (IOException) { }
-    }
-}
-
-sealed class OwnedResponse(HttpResponseMessage response, HttpClient client) : HttpResponseMessage(response.StatusCode)
-{
-    private readonly HttpResponseMessage inner = response;
-    private readonly HttpClient client = client;
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            inner.Dispose();
-            client.Dispose();
-        }
-        base.Dispose(disposing);
     }
 }
 
@@ -1261,6 +1549,7 @@ sealed class ToggleFixture : IAsyncDisposable
     internal string Html { get; }
     internal string? ContentSecurityPolicy { get; }
     internal ReaderServer Server => server;
+    internal void StartListener() => server.Start();
 
     internal static Task<ToggleFixture> CreateAsync(string source, ThemeConfigStore? themeConfig = null,
         IFileDialogProvider? fileDialogs = null) =>
@@ -1276,15 +1565,10 @@ sealed class ToggleFixture : IAsyncDisposable
         var server = new ReaderServer(themeConfig: themeConfig, fileDialogs: fileDialogs);
         try
         {
-            server.Start();
             var document = server.RegisterDocument(path);
-            using var client = new HttpClient();
-            using var response = await client.GetAsync($"http://127.0.0.1:{server.Port}/d/{document.Id}");
-            response.EnsureSuccessStatusCode();
-            var html = await response.Content.ReadAsStringAsync();
-            var contentSecurityPolicy = response.Headers.TryGetValues("Content-Security-Policy", out var policies)
-                ? policies.Single()
-                : null;
+            var response = await server.Host.HandleAsync(new HostRequest("GET", $"/d/{document.Id}", null, []));
+            var html = Encoding.UTF8.GetString(response.Body);
+            var contentSecurityPolicy = response.Headers.GetValueOrDefault("Content-Security-Policy");
             var match = ToggleConfiguration.Match(html);
             if (!match.Success) throw new InvalidOperationException("Rendered document did not expose toggle configuration.");
             var renderedId = JsonSerializer.Deserialize<string>(match.Groups["id"].Value);
@@ -1304,11 +1588,9 @@ sealed class ToggleFixture : IAsyncDisposable
     internal async Task<HttpStatusCode> ToggleAsync(int line, bool expectedChecked, string? token = "__fixture_token__")
     {
         var effectiveToken = token == "__fixture_token__" ? Token : token;
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{server.Port}/toggle");
-        request.Headers.Add("Origin", $"http://127.0.0.1:{server.Port}");
-        request.Content = JsonContent.Create(new { id = Id, line, @checked = expectedChecked, token = effectiveToken });
-        using var response = await client.SendAsync(request);
-        return response.StatusCode;
+        var body = JsonSerializer.SerializeToUtf8Bytes(new { id = Id, line, @checked = expectedChecked, token = effectiveToken });
+        var response = await SendAsync("POST", "/toggle", body, DocumentHost.Origin);
+        return (HttpStatusCode)response.StatusCode;
     }
 
     internal Task<HttpStatusCode> ThemeAsync(string? theme, string? token = "__fixture_token__",
@@ -1320,12 +1602,8 @@ sealed class ToggleFixture : IAsyncDisposable
 
     internal async Task<HttpStatusCode> ThemeRawAsync(string json, string? origin = "__fixture_origin__")
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{server.Port}/theme");
-        if (origin is not null)
-            request.Headers.Add("Origin", origin == "__fixture_origin__" ? $"http://127.0.0.1:{server.Port}" : origin);
-        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-        using var response = await client.SendAsync(request);
-        return response.StatusCode;
+        var response = await SendAsync("POST", "/theme", Encoding.UTF8.GetBytes(json), EffectiveOrigin(origin));
+        return (HttpStatusCode)response.StatusCode;
     }
 
     internal Task<CommandResponse> CommandAsync(string command, string? token = "__fixture_token__",
@@ -1337,19 +1615,14 @@ sealed class ToggleFixture : IAsyncDisposable
 
     internal async Task<CommandResponse> CommandRawAsync(string json, string? origin = "__fixture_origin__")
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post,
-            $"http://127.0.0.1:{server.Port}/command/{Id}");
-        if (origin is not null)
-            request.Headers.Add("Origin", origin == "__fixture_origin__" ? $"http://127.0.0.1:{server.Port}" : origin);
-        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-        using var response = await client.SendAsync(request);
+        var response = await SendAsync("POST", $"/command/{Id}", Encoding.UTF8.GetBytes(json), EffectiveOrigin(origin));
         string? documentId = null;
-        if (response.Content.Headers.ContentLength is > 0 && response.Content.Headers.ContentType?.MediaType == "application/json")
+        if (response.Body.Length > 0 && response.ContentType.StartsWith("application/json", StringComparison.Ordinal))
         {
-            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            using var body = JsonDocument.Parse(response.Body);
             documentId = body.RootElement.TryGetProperty("id", out var id) ? id.GetString() : null;
         }
-        return new CommandResponse(response.StatusCode, documentId);
+        return new CommandResponse((HttpStatusCode)response.StatusCode, documentId);
     }
 
     internal Task<(HttpStatusCode Status, JsonDocument? Body)> EditAsync(string route, object body,
@@ -1363,63 +1636,42 @@ sealed class ToggleFixture : IAsyncDisposable
     internal async Task<(HttpStatusCode Status, JsonDocument? Body)> EditRawAsync(string route, string json,
         string? origin = "__fixture_origin__", string? documentId = null)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{server.Port}/{route}/{documentId ?? Id}");
-        if (origin is not null)
-            request.Headers.Add("Origin", origin == "__fixture_origin__" ? $"http://127.0.0.1:{server.Port}" : origin);
-        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-        using var response = await client.SendAsync(request);
-        var body = response.Content.Headers.ContentType?.MediaType == "application/json"
-            ? JsonDocument.Parse(await response.Content.ReadAsStringAsync())
+        var response = await SendAsync("POST", $"/{route}/{documentId ?? Id}", Encoding.UTF8.GetBytes(json),
+            EffectiveOrigin(origin));
+        var body = response.ContentType.StartsWith("application/json", StringComparison.Ordinal)
+            ? JsonDocument.Parse(response.Body)
             : null;
-        return (response.StatusCode, body);
+        return ((HttpStatusCode)response.StatusCode, body);
     }
 
-    internal async Task<EventStream> ConnectEventsAsync()
-    {
-        var eventClient = new HttpClient();
-        try
-        {
-            var response = await eventClient.SendAsync(
-                new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{server.Port}/events/{Id}"),
-                HttpCompletionOption.ResponseHeadersRead);
-            response.EnsureSuccessStatusCode();
-            var stream = await response.Content.ReadAsStreamAsync();
-            var reader = new StreamReader(stream, Encoding.UTF8);
-            var firstLine = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2));
-            if (firstLine != ": connected")
-            {
-                response.Dispose();
-                eventClient.Dispose();
-                throw new InvalidOperationException("SSE connection did not send its connected comment.");
-            }
-            _ = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(2));
-            return new EventStream(eventClient, response, reader);
-        }
-        catch
-        {
-            eventClient.Dispose();
-            throw;
-        }
-    }
+    internal Task<EventStream> ConnectEventsAsync() => Task.FromResult(new EventStream(server.Host, Id));
 
     internal async Task<string?> FetchContentSecurityPolicyAsync()
     {
-        using var response = await client.GetAsync($"http://127.0.0.1:{server.Port}/d/{Id}");
-        response.EnsureSuccessStatusCode();
-        return response.Headers.TryGetValues("Content-Security-Policy", out var policies) ? policies.Single() : null;
+        var response = await SendAsync("GET", $"/d/{Id}", [], null);
+        return response.Headers.GetValueOrDefault("Content-Security-Policy");
     }
 
     internal async Task<string> FetchHtmlAsync()
     {
-        using var response = await client.GetAsync($"http://127.0.0.1:{server.Port}/d/{Id}");
-        response.EnsureSuccessStatusCode();
-        return await response.Content.ReadAsStringAsync();
+        var response = await SendAsync("GET", $"/d/{Id}", [], null);
+        return Encoding.UTF8.GetString(response.Body);
     }
 
     internal async Task<HttpStatusCode> FetchDocumentStatusAsync(string id)
     {
-        using var response = await client.GetAsync($"http://127.0.0.1:{server.Port}/d/{id}");
-        return response.StatusCode;
+        var response = await SendAsync("GET", $"/d/{id}", [], null);
+        return (HttpStatusCode)response.StatusCode;
+    }
+
+    private string? EffectiveOrigin(string? origin) =>
+        origin == "__fixture_origin__" ? DocumentHost.Origin : origin;
+
+    private async Task<HostResponse> SendAsync(string method, string path, byte[] body, string? origin)
+    {
+        var response = await server.Host.HandleAsync(new HostRequest(method, path, origin, body));
+        server.Host.CompleteResponse(response);
+        return response;
     }
 
     public ValueTask DisposeAsync()
@@ -1462,19 +1714,16 @@ sealed class StubFileDialogs : IFileDialogProvider
 
 sealed class EventStream : IAsyncDisposable
 {
-    private readonly HttpClient client;
-    private readonly HttpResponseMessage response;
-    private readonly StreamReader reader;
+    private readonly DocumentHost host;
+    private readonly string documentId;
     private readonly Channel<ProbeEvent> events = Channel.CreateUnbounded<ProbeEvent>();
-    private readonly Task readPump;
-    private volatile bool stopping;
 
-    internal EventStream(HttpClient client, HttpResponseMessage response, StreamReader reader)
+    internal EventStream(DocumentHost host, string documentId)
     {
-        this.client = client;
-        this.response = response;
-        this.reader = reader;
-        readPump = ReadEventsAsync();
+        this.host = host;
+        this.documentId = documentId;
+        host.DocumentChanged += OnDocumentChanged;
+        host.ThemeChanged += OnThemeChanged;
     }
 
     internal async Task<bool> HasReloadAsync(TimeSpan timeout) =>
@@ -1488,53 +1737,25 @@ sealed class EventStream : IAsyncDisposable
             while (await events.Reader.WaitToReadAsync(cancellation.Token))
                 while (events.Reader.TryRead(out var message))
                     if (message.Name == eventName) return message.Data;
-            throw new IOException("SSE stream ended before the assertion completed.");
+            throw new IOException("Event source ended before the assertion completed.");
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
-            if (readPump.IsCompleted) await events.Reader.Completion;
             return null;
         }
     }
 
-    private async Task ReadEventsAsync()
-    {
-        try
-        {
-            string? eventName = null;
-            string? data = null;
-            while (true)
-            {
-                var line = await reader.ReadLineAsync();
-                if (line is null)
-                    throw new IOException("SSE stream closed unexpectedly.");
-                if (line.StartsWith("event: ", StringComparison.Ordinal)) eventName = line[7..];
-                else if (line.StartsWith("data: ", StringComparison.Ordinal)) data = line[6..];
-                else if (line.Length == 0 && eventName is not null)
-                {
-                    events.Writer.TryWrite(new ProbeEvent(eventName, data ?? string.Empty));
-                    eventName = null;
-                    data = null;
-                }
-            }
-        }
-        catch (Exception) when (stopping)
-        {
-            events.Writer.TryComplete();
-        }
-        catch (Exception exception)
-        {
-            events.Writer.TryComplete(exception);
-        }
-    }
+    private void OnDocumentChanged(string id)
+    { if (id == documentId) events.Writer.TryWrite(new ProbeEvent("reload", "reload")); }
 
-    public async ValueTask DisposeAsync()
+    private void OnThemeChanged(string theme) => events.Writer.TryWrite(new ProbeEvent("theme", theme));
+
+    public ValueTask DisposeAsync()
     {
-        stopping = true;
-        response.Dispose();
-        reader.Dispose();
-        client.Dispose();
-        await readPump.ConfigureAwait(false);
+        host.DocumentChanged -= OnDocumentChanged;
+        host.ThemeChanged -= OnThemeChanged;
+        events.Writer.TryComplete();
+        return ValueTask.CompletedTask;
     }
 
     private sealed record ProbeEvent(string Name, string Data);

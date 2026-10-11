@@ -22,6 +22,7 @@ public sealed record HostResponse(
 /// <summary>Handles registered documents independently of any network transport.</summary>
 public sealed class DocumentHost : IDisposable
 {
+    public const string Origin = "https://mdview.example";
     public const long MaximumStandardBodyBytes = 64L * 1024;
     public const long MaximumEditBodyBytes = 64L * 1024 * 1024;
     private static readonly IReadOnlyDictionary<string, string> NoHeaders =

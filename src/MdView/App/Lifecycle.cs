@@ -5,6 +5,7 @@ namespace MdView.App;
 public sealed class Lifecycle : IDisposable
 {
     private readonly ReaderServer server;
+    private readonly ILifecycleSignals signals;
     private readonly InstanceCoordinator coordinator;
     private readonly IBrowserLauncher browserLauncher;
     private readonly TimeSpan gracePeriod;
@@ -12,15 +13,18 @@ public sealed class Lifecycle : IDisposable
     private readonly Action<string>? reportMessage;
     private readonly object gate = new();
     private readonly TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Dictionary<LaunchTicket, CancellationTokenSource> pendingLaunches = [];
+    // Only for launchers that cannot hold a ticket (the legacy browser launcher and the probe stubs): their
+    // connects are matched to launches first-in, first-out. Ticketed launchers resolve their own tickets.
+    private readonly Queue<LaunchTicket> implicitLaunches = new();
     private CancellationTokenSource? graceTimer;
-    private CancellationTokenSource? startupTimer;
     private int activeClients;
     private int activeModalCommands;
-    private bool clientExpected;
     private bool shuttingDown;
 
     public Lifecycle(
         ReaderServer server,
+        ILifecycleSignals signals,
         InstanceCoordinator coordinator,
         IBrowserLauncher browserLauncher,
         TimeSpan? gracePeriod = null,
@@ -28,26 +32,39 @@ public sealed class Lifecycle : IDisposable
         Action<string>? reportMessage = null)
     {
         this.server = server;
+        this.signals = signals;
         this.coordinator = coordinator;
         this.browserLauncher = browserLauncher;
         this.gracePeriod = gracePeriod ?? TimeSpan.FromSeconds(8);
         this.startupTimeout = startupTimeout ?? TimeSpan.FromSeconds(30);
         this.reportMessage = reportMessage;
 
-        server.ClientConnected += OnClientConnected;
-        server.ClientDisconnected += OnClientDisconnected;
-        server.DocumentOpened += OnDocumentOpened;
-        server.ModalCommandStarted += OnModalCommandStarted;
-        server.ModalCommandCompleted += OnModalCommandCompleted;
-        server.ExitRequested += OnExitRequested;
-        ArmStartupGuard();
+        signals.ClientConnected += OnClientConnected;
+        signals.ClientDisconnected += OnClientDisconnected;
+        signals.DocumentOpened += OnDocumentOpened;
+        signals.ModalCommandStarted += OnModalCommandStarted;
+        signals.ModalCommandCompleted += OnModalCommandCompleted;
+        signals.ExitRequested += OnExitRequested;
+        lock (gate) ArmGraceIfIdle();
     }
 
     public Task Completion => completion.Task;
 
     public bool TryLaunch(RegisteredDocument document)
     {
+        var ticket = BeginLaunch(implicitResolution: browserLauncher is not IQueuedWindowLauncher);
+        if (ticket is null) return false;
+
         var url = DocumentUrl(document);
+        if (browserLauncher is IQueuedWindowLauncher ticketed)
+        {
+            // A ticketed launcher resolves the ticket and tells the user about a failure itself.
+            if (ticketed.TryLaunch(url, ticket, out _)) return true;
+            ticket.Resolve(LaunchOutcome.Abandoned);
+            Shutdown();
+            return false;
+        }
+
         if (browserLauncher.TryLaunch(url, out var error))
         {
             if (error is not null)
@@ -58,7 +75,8 @@ public sealed class Lifecycle : IDisposable
             return true;
         }
 
-        reportMessage?.Invoke(error ?? "The browser could not be opened.");
+        ticket.Resolve(LaunchOutcome.Abandoned);
+        reportMessage?.Invoke(error ?? "The mdview window could not be opened.");
         Shutdown();
         return false;
     }
@@ -74,15 +92,20 @@ public sealed class Lifecycle : IDisposable
 
             shuttingDown = true;
             CancelTimer(ref graceTimer);
-            CancelTimer(ref startupTimer);
+            foreach (var timer in pendingLaunches.Values)
+            {
+                timer.Cancel();
+                timer.Dispose();
+            }
+            pendingLaunches.Clear();
         }
 
-        server.ClientConnected -= OnClientConnected;
-        server.ClientDisconnected -= OnClientDisconnected;
-        server.DocumentOpened -= OnDocumentOpened;
-        server.ModalCommandStarted -= OnModalCommandStarted;
-        server.ModalCommandCompleted -= OnModalCommandCompleted;
-        server.ExitRequested -= OnExitRequested;
+        signals.ClientConnected -= OnClientConnected;
+        signals.ClientDisconnected -= OnClientDisconnected;
+        signals.DocumentOpened -= OnDocumentOpened;
+        signals.ModalCommandStarted -= OnModalCommandStarted;
+        signals.ModalCommandCompleted -= OnModalCommandCompleted;
+        signals.ExitRequested -= OnExitRequested;
         coordinator.DeleteHandshake();
         server.Dispose();
         coordinator.Dispose();
@@ -90,28 +113,74 @@ public sealed class Lifecycle : IDisposable
     }
 
     private string DocumentUrl(RegisteredDocument document) =>
-        $"http://127.0.0.1:{server.Port}/d/{Uri.EscapeDataString(document.Id)}";
+        $"{DocumentHost.Origin}/d/{Uri.EscapeDataString(document.Id)}";
 
     private void OnExitRequested() => browserLauncher.RequestExit(Shutdown);
 
     private void OnDocumentOpened(RegisteredDocument document)
     {
+        var ticket = BeginLaunch(implicitResolution: browserLauncher is not IQueuedWindowLauncher);
+        if (ticket is null) return;
+
+        var url = DocumentUrl(document);
+        if (browserLauncher is IQueuedWindowLauncher queued)
+        {
+            queued.QueueLaunch(url, ticket, error =>
+            {
+                if (error is not null) reportMessage?.Invoke(error);
+            });
+        }
+        else
+        {
+            _ = Task.Run(() =>
+            {
+                if (!browserLauncher.TryLaunch(url, out var error))
+                {
+                    ticket.Resolve(LaunchOutcome.Abandoned);
+                    reportMessage?.Invoke(error ?? "The mdview window could not be opened.");
+                }
+            });
+        }
+    }
+
+    /// <summary>
+    /// Counts one expected reader for a requested launch, until the returned ticket resolves (any outcome).
+    /// A launch that does not resolve within the startup timeout resolves itself as abandoned.
+    /// Returns null once shutdown has begun.
+    /// </summary>
+    private LaunchTicket? BeginLaunch(bool implicitResolution)
+    {
+        var ticket = new LaunchTicket(OnLaunchResolved);
         lock (gate)
         {
-            if (shuttingDown)
-            {
-                return;
-            }
+            if (shuttingDown) return null;
 
             CancelTimer(ref graceTimer);
-            ArmStartupGuard();
+            pendingLaunches.Add(ticket, StartTimer(startupTimeout, () => ticket.Resolve(LaunchOutcome.Abandoned)));
+            if (implicitResolution) implicitLaunches.Enqueue(ticket);
         }
 
-        TryLaunch(document);
+        return ticket;
+    }
+
+    private void OnLaunchResolved(LaunchTicket ticket)
+    {
+        lock (gate)
+        {
+            if (pendingLaunches.Remove(ticket, out var timer))
+            {
+                timer.Cancel();
+                timer.Dispose();
+            }
+
+            if (shuttingDown) return;
+            ArmGraceIfIdle();
+        }
     }
 
     private void OnClientConnected()
     {
+        LaunchTicket? implicitTicket = null;
         lock (gate)
         {
             if (shuttingDown)
@@ -120,10 +189,15 @@ public sealed class Lifecycle : IDisposable
             }
 
             activeClients++;
-            clientExpected = false;
-            CancelTimer(ref startupTimer);
             CancelTimer(ref graceTimer);
+            while (implicitTicket is null && implicitLaunches.TryDequeue(out var candidate))
+            {
+                if (!candidate.IsResolved) implicitTicket = candidate;
+            }
         }
+
+        // A launcher that cannot hold a ticket learns of a connection only through this signal.
+        implicitTicket?.Resolve(LaunchOutcome.Connected);
     }
 
     private void OnClientDisconnected()
@@ -136,11 +210,7 @@ public sealed class Lifecycle : IDisposable
             }
 
             activeClients--;
-            if (activeClients == 0 && activeModalCommands == 0)
-            {
-                CancelTimer(ref graceTimer);
-                graceTimer = StartTimer(gracePeriod, GraceExpired);
-            }
+            ArmGraceIfIdle();
         }
     }
 
@@ -150,7 +220,6 @@ public sealed class Lifecycle : IDisposable
         {
             if (shuttingDown) return;
             activeModalCommands++;
-            CancelTimer(ref startupTimer);
             CancelTimer(ref graceTimer);
         }
     }
@@ -161,32 +230,23 @@ public sealed class Lifecycle : IDisposable
         {
             if (shuttingDown || activeModalCommands == 0) return;
             activeModalCommands--;
-            if (activeModalCommands == 0 && activeClients == 0)
-            {
-                CancelTimer(ref graceTimer);
-                graceTimer = StartTimer(gracePeriod, GraceExpired);
-            }
+            ArmGraceIfIdle();
         }
     }
 
-    private void StartupExpired()
+    /// <summary>Caller holds <see cref="gate"/>. Starts the exit grace once nothing can keep the process alive.</summary>
+    private void ArmGraceIfIdle()
     {
-        lock (gate)
-        {
-            if (shuttingDown || activeClients != 0 || activeModalCommands != 0 || !clientExpected)
-            {
-                return;
-            }
-        }
-
-        Shutdown();
+        if (activeClients != 0 || activeModalCommands != 0 || pendingLaunches.Count != 0) return;
+        CancelTimer(ref graceTimer);
+        graceTimer = StartTimer(gracePeriod, GraceExpired);
     }
 
     private void GraceExpired()
     {
         lock (gate)
         {
-            if (shuttingDown || activeClients != 0 || activeModalCommands != 0 || clientExpected)
+            if (shuttingDown || activeClients != 0 || activeModalCommands != 0 || pendingLaunches.Count != 0)
             {
                 return;
             }
@@ -200,13 +260,6 @@ public sealed class Lifecycle : IDisposable
         var cancellation = new CancellationTokenSource();
         _ = RunTimerAsync(delay, callback, cancellation.Token);
         return cancellation;
-    }
-
-    private void ArmStartupGuard()
-    {
-        clientExpected = true;
-        CancelTimer(ref startupTimer);
-        startupTimer = StartTimer(startupTimeout, StartupExpired);
     }
 
     private static async Task RunTimerAsync(TimeSpan delay, Action callback, CancellationToken cancellationToken)

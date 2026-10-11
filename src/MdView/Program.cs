@@ -35,8 +35,8 @@ internal static class Program
             var document = server.RegisterDocument(path);
             coordinator.WriteHandshake(server.Port);
 
-            IBrowserLauncher browserLauncher = new WebViewWindowLauncher(new BrowserLauncher(), ShowWarning);
-            using var lifecycle = new Lifecycle(server, coordinator, browserLauncher, reportMessage: ShowWarning);
+            var browserLauncher = new WebViewWindowLauncher(server.Host, ShowWarning);
+            using var lifecycle = new Lifecycle(server, browserLauncher, coordinator, browserLauncher, reportMessage: ShowWarning);
             Console.CancelKeyPress += (_, eventArgs) =>
             {
                 eventArgs.Cancel = true;

@@ -12,8 +12,10 @@ restate it here.
 
 A Windows desktop utility. Double-clicking a `.md` file renders it with
 Claude-artifact-style typography and opens it in **its own native window hosting
-WebView2** (v1.4, `W1-WINDOW`; a browser `--app=` window only as a fallback when WebView2
-is unavailable), live-reloading when the file changes on disk. Distributed as an installer
+WebView2** (v1.4, `W1-WINDOW`), live-reloading when the file changes on disk. Since
+`W2B-INPROCESS` each window answers its page's requests in-process (private origin
+`https://mdview.example`); the loopback listener carries only a second launch's `/open`
+hand-off, and there is no browser fallback. Distributed as an installer
 from GitHub Releases.
 
 It is a *reading* tool first. Every page loads locked; editing happens only after the
@@ -37,10 +39,14 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
 
 ## Dependencies
 
-- **The only NuGet dependency is `Markdig`.** Everything else comes from the BCL:
-  `HttpListener` for the server, `FileSystemWatcher` for change detection, `Mutex` for
-  single-instance, `Microsoft.Win32.Registry` (built into `net8.0-windows`) for
-  locating the browser.
+- **The NuGet dependencies are `Markdig` and `Microsoft.Web.WebView2`, nothing else.**
+  *(Corrected 2026-10-10: WebView2 was added in `W1-WINDOW`, v1.4, while this line still
+  said Markdig was the only one.)* Only WebView2's `Core` assembly and native loader are
+  used; `MdView.csproj` deliberately excludes its WPF/WinForms wrappers (they cost warning
+  MSB3277 and ~35 MB). Everything else comes from the BCL: `HttpListener` for the
+  loopback listener, `FileSystemWatcher` for change detection, `Mutex` for
+  single-instance, `Microsoft.Win32.Registry` (built into `net8.0-windows`) for locating
+  the fallback browser.
 - **Do not add a NuGet or CDN dependency inside a worker sandbox** — it has no
   registry or network access and the restore will fail. Report it via Blocker and let
   the PM add it first (Standard §14).
@@ -58,8 +64,9 @@ user unlocks it (`projectoutline.md` §7, "Edit mode").
   absolute path in an in-process table and serve only ids present in that table.
   Never take a filesystem path from the query string and read it — that is a path
   traversal hole.
-- **Never leave an orphaned process.** The server exits when its last reader window
-  disconnects. A user who closes every reader window must not have a `mdview.exe`
+- **Never leave an orphaned process.** The process exits when its last reader window
+  closes and no window is still being opened (`Lifecycle`: every launch resolves exactly
+  once — connected, abandoned, or satisfied by an existing window). A user who closes every reader window must not have a `mdview.exe`
   lingering in Task Manager.
 - Markdown rendering is **untrusted input.** *(Rule rewritten 2026-09-16 after
   `S6-XSS`; the previous wording asserted `DisableHtml()` was sufficient and was

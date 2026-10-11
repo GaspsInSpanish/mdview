@@ -65,10 +65,11 @@ mdview.exe  --- Mutex "Local\mdview-singleton" already held? ---+
 | `MarkdownRenderer` | The one `DocumentKind` implemented in v1: Markdig pipeline + URI sanitizer |
 | `DocumentRegistry` | Opaque id ⇄ absolute path. **The security boundary** — only registered ids are servable |
 | `DocumentHost` | v1.4 (`W2A-HOST`): every request the page makes (`/d`, `/open`, `/toggle`, `/theme`, `/command`, `/source`, `/render`, `/save`), transport-agnostic: `HandleAsync(HostRequest) -> HostResponse`. Owns the registry, watchers, echo suppression, write token, and the origin + token checks. Raises `DocumentChanged`/`ThemeChanged` for whichever transport pushes events. Per-route body caps (`MaximumBodyBytes`: 64 MiB edit routes, 64 KiB others) |
-| `ReaderServer` | Thin loopback HTTP/SSE adapter over `DocumentHost`. Refuses unknown routes, a wrong `Origin`, and oversize declared bodies **before reading the body**; SSE for reload/theme. Goes away for pages in W2b and entirely in W3 |
+| `ReaderServer` | Since W2b: loopback listener for one route, `POST /open` (a second launch hands its path over). Refuses any request carrying an `Origin` header (a browser page) and every other route before reading the body. Deleted in W3 |
+| `InProcessRequestAdapter` / `InProcessRequestFlow` | W2b: the window's `WebResourceRequested` path into `DocumentHost`. Body read synchronously on the UI thread, host awaited without leaving it (WebView2 only accepts the response there), deferral completed on every path, `CompleteResponse` after delivery |
 | `DocumentEditService` | Edit mode's write path: decode (UTF-8 only is editable), hash-checked save, BOM restore, atomic replace |
 | `FileWatcher` | `FileSystemWatcher` per open doc, debounced, pushes reload over SSE |
-| `WebViewWindowLauncher` | v1.4: one background STA UI thread owning a native window per document, each hosting WebView2 on the loopback page. Handles focus, dirty-close prompts, File → Exit across windows, external links, renderer crashes |
+| `WebViewWindowLauncher` | One background STA UI thread owning a native window per document, each hosting WebView2 on `https://mdview.example` (in-process since W2b). Pushes reload/theme into windows. Every launch carries a `LaunchTicket` that resolves exactly once (connected / abandoned / satisfied by an existing window); `Lifecycle` counts per ticket. First launch from `Main` waits and, on WebView2 failure, shows the download prompt synchronously; later launches are fire-and-forget |
 | `BrowserLauncher` | Fallback when WebView2 is unavailable: Brave → Chrome → Edge (`BrowserDiscovery`, pure and probe-tested) as `--app=`; default browser as last resort |
 | `InstanceCoordinator` | Named mutex, handshake file, hand-off to the running instance |
 | `Lifecycle` | Ref-counts SSE clients; shuts the process down when the last reader closes |
@@ -357,6 +358,16 @@ the plan: `IBrowserLauncher.RequestExit` (default member), so File → Exit runs
 window's unsaved-edits prompt instead of the process exit silently taking them. Known
 wrinkle until W2 moves exit out of the server: exiting from a window with unsaved
 edits can ask twice (once from the page, once from the window).
+
+**W2b accepted 2026-10-11, not yet released.** Windows black-box run on the owner's desktop: every behaviour passed (in-process save via a UI-Automation-ticked checkbox, pushed live reload, second launch into the same process, exit 8.1 s after the last window, the WebView2-missing download prompt shown before exit). In-process transport, pushed events,
+window-driven lifecycle with per-launch tickets, `/open`-only listener, no browser
+fallback. Four review rounds: off-UI-thread WebView2 response (every save would have
+hung), blocking hand-off (duplicate windows), reload after Save As, an orphaned process
+on re-open + modal, and a first-launch prompt that died with the process. Escalated from
+Codex to a Claude worker after two rounds (§9). Accepted residuals: cancelling File →
+Exit at an unsaved-edits prompt leaves launches requested in the preceding second
+abandoned (re-open the file); a first window whose page fails to load closes silently
+after the startup timeout.
 
 Each packet ships as its own release, so a regression is always one step back.
 Everything in the "No" column gets a precise click-list for the owner, per

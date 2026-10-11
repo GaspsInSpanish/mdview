@@ -509,7 +509,7 @@ Every packet in §7 is independently dispatchable and independently verifiable, 
 
 **Q5 — Binary size budget.** The installer is 30.8 MB. KaTeX adds ≈1 MB, mermaid ≈3 MB. Is there a number above which you'd rather not ship a feature? This determines whether T-1 is "later" or "never."
 
-**Q6 — May a YAML dependency be added?** `AGENTS.md` says Markdig is the only NuGet dependency, and Standard §14 requires the PM to add any new package *before* dispatch. `YamlDotNet` is the obvious choice for S-2's metadata card. The alternative is a hand-rolled scalar-and-inline-list subset — less code to trust, but it will silently mis-handle anchors, multi-line strings, and nested maps. I lean hand-rolled subset (a *header card* doesn't need real YAML), but it's your rule to bend.
+**Q6 — May a YAML dependency be added?** `AGENTS.md` says Markdig is the only NuGet dependency *(true when written; since v1.4 the rule is Markdig plus WebView2, corrected 2026-10-10)*, and Standard §14 requires the PM to add any new package *before* dispatch. `YamlDotNet` is the obvious choice for S-2's metadata card. The alternative is a hand-rolled scalar-and-inline-list subset — less code to trust, but it will silently mis-handle anchors, multi-line strings, and nested maps. I lean hand-rolled subset (a *header card* doesn't need real YAML), but it's your rule to bend.
 
 **Q7 — Is there any notion of a "trusted directory"?** Several rejected features (T-2, T-3) become tractable if mdview distinguishes "a file in my notes tree" from "a file someone sent me." That is a real architectural concept with real complexity, and it is the kind of thing that must be decided once rather than discovered feature by feature. Do you want it on the table?
 
