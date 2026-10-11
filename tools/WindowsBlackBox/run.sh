@@ -14,6 +14,18 @@ work="$(wslpath -u "$windows_temp")/mdview-blackbox-$$"
 mkdir -p "$work"
 trap 'rm -rf "$publish" "$work"' EXIT
 cp "$publish/mdview.exe" "$repo/tools/WindowsBlackBox/Check-Window.ps1" "$work/"
+# The check writes the owner's real config.json (window placement) and must restore it. Verify that
+# here, independently of the script's own restore, and fail the run if their settings changed.
+owner_config="$(wslpath -u "$(cmd.exe /c 'echo %APPDATA%' 2>/dev/null | tr -d '\r')")/mdview/config.json"
+config_before="$publish/config.before"
+[ -f "$owner_config" ] && cp "$owner_config" "$config_before"
 cd "$work"
+status=0
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$work/Check-Window.ps1")" \
-  -Exe "$(wslpath -w "$work/mdview.exe")" -WorkDir "$(wslpath -w "$work")" | tr -d '\r'
+  -Exe "$(wslpath -w "$work/mdview.exe")" -WorkDir "$(wslpath -w "$work")" | tr -d '\r' || status=$?
+if [ -f "$config_before" ]; then
+  cmp -s "$owner_config" "$config_before" || { echo "OWNER CONFIG CHANGED: $owner_config differs from before the run" >&2; status=1; }
+elif [ -f "$owner_config" ]; then
+  echo "OWNER CONFIG CREATED: $owner_config did not exist before the run" >&2; status=1
+fi
+exit $status

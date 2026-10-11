@@ -378,6 +378,17 @@ soon as the last window closes (0.3 s measured); a secondary whose hand-off fail
 the primary's mutex frees. Windows black-box 15/15, including two bursts of five simultaneous
 launches.
 
+**W3b accepted 2026-10-11, not yet released.** Window placement remembered in `config.json`
+(screen coordinates, tagged; restored only onto a visible work area; cascaded; best-effort, never
+blocks a window), and a dropped or clicked `file:` `.md` opens through the hand-off validation.
+`file:` navigation is reachable from **links in documents** (the sanitizer allows `file:`), so it
+refuses any host, any two-separator path, and anything but a normalised drive-letter path before
+the filesystem is touched (a UNC `File.Exists` would offer the user's credentials to the server).
+Every ServeProbe suite was also run **natively on Windows** (`tools/WindowsBlackBox/run-probes.sh`),
+which caught a test expectation Linux could not. Accepted residuals: mixed-DPI monitors may rescale a
+restored window; a local `.md` symlinked to a network path still reaches the network (needs prior
+local write access).
+
 Each packet ships as its own release, so a regression is always one step back.
 Everything in the "No" column gets a precise click-list for the owner, per
 `docs/MANUAL_REVIEW.md`.

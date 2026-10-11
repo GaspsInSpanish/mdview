@@ -15,6 +15,11 @@ internal static class WebViewNative
     internal const uint WsOverlappedWindow = 0x00CF0000;
     internal const int CwUseDefault = unchecked((int)0x80000000);
     internal const int SwShow = 5;
+    internal const uint SwShownormal = 1;
+    internal const uint SwShowMaximized = 3;
+    internal const uint WindowPlacementRestoreToMaximized = 0x0002;
+    internal const uint MonitorDefaultToNull = 0;
+    internal const uint MonitorDefaultToNearest = 2;
     internal const nuint SizeMinimized = 1;
     internal const ushort WaInactive = 0;
     internal const uint SwpNoZOrder = 0x0004;
@@ -71,6 +76,26 @@ internal static class WebViewNative
         internal int Bottom;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct WindowPlacement
+    {
+        internal uint Length;
+        internal uint Flags;
+        internal uint ShowCommand;
+        internal Point MinimumPosition;
+        internal Point MaximumPosition;
+        internal Rect NormalPosition;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    internal struct MonitorInfo
+    {
+        internal uint Size;
+        internal Rect Monitor;
+        internal Rect Work;
+        internal uint Flags;
+    }
+
     internal delegate nint WindowProcedure(nint window, uint message, nuint wParam, nint lParam);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -118,6 +143,24 @@ internal static class WebViewNative
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetClientRect(nint window, out Rect rect);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetWindowPlacement(nint window, ref WindowPlacement placement);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetWindowPlacement(nint window, ref WindowPlacement placement);
+
+    [DllImport("user32.dll")]
+    internal static extern nint MonitorFromRect(ref Rect rect, uint flags);
+
+    [DllImport("user32.dll")]
+    internal static extern nint MonitorFromWindow(nint window, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetMonitorInfoW(nint monitor, ref MonitorInfo info);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetWindowTextW(nint window, string text);
@@ -127,6 +170,9 @@ internal static class WebViewNative
 
     [DllImport("user32.dll")]
     internal static extern uint GetDpiForSystem();
+
+    [DllImport("user32.dll")]
+    internal static extern uint GetDpiForWindow(nint window);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern nint LoadCursorW(nint instance, nint cursorName);

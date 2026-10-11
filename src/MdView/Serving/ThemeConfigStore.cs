@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -12,13 +13,14 @@ public enum ThemePreference
 
 public sealed class ThemeConfigStore
 {
-    private readonly object gate = new();
+    private readonly ConfigFileStore config;
 
     public ThemeConfigStore(string? stateDirectory = null)
     {
         StateDirectory = stateDirectory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "mdview");
         ConfigPath = Path.Combine(StateDirectory, "config.json");
+        config = new ConfigFileStore(ConfigPath);
     }
 
     public string StateDirectory { get; }
@@ -26,34 +28,21 @@ public sealed class ThemeConfigStore
 
     public ThemePreference ReadTheme()
     {
-        lock (gate)
+        return config.Read(root =>
         {
-            var root = TryReadObject();
             if (root is null || !root.TryGetPropertyValue("theme", out var value) ||
                 value is not JsonValue jsonValue || !jsonValue.TryGetValue<string>(out var theme))
                 return ThemePreference.System;
             return TryParse(theme, out var preference) ? preference : ThemePreference.System;
-        }
+        });
     }
 
     public void WriteTheme(ThemePreference theme)
     {
-        lock (gate)
+        config.Update(root =>
         {
-            Directory.CreateDirectory(StateDirectory);
-            var root = TryReadObject() ?? new JsonObject();
             root["theme"] = ToWireValue(theme);
-            var temporaryPath = Path.Combine(StateDirectory, $"config.{Guid.NewGuid():N}.tmp");
-            try
-            {
-                File.WriteAllText(temporaryPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-                File.Move(temporaryPath, ConfigPath, true);
-            }
-            finally
-            {
-                try { File.Delete(temporaryPath); } catch (IOException) { }
-            }
-        }
+        });
     }
 
     public static bool TryParse(string? value, out ThemePreference theme)
@@ -75,17 +64,83 @@ public sealed class ThemeConfigStore
         ThemePreference.Dark => "dark",
         _ => throw new ArgumentOutOfRangeException(nameof(theme), theme, "Unknown theme preference.")
     };
+}
 
-    private JsonObject? TryReadObject()
+internal sealed class ConfigFileStore
+{
+    private static readonly ConcurrentDictionary<string, object> Gates =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly object gate;
+    private readonly string directory;
+    private readonly string path;
+
+    internal ConfigFileStore(string path)
     {
-        if (!File.Exists(ConfigPath)) return null;
-        try
+        this.path = Path.GetFullPath(path);
+        directory = Path.GetDirectoryName(this.path)
+            ?? throw new ArgumentException("The config path must have a directory.", nameof(path));
+        gate = Gates.GetOrAdd(this.path, static _ => new object());
+    }
+
+    internal T Read<T>(Func<JsonObject?, T> read)
+    {
+        lock (gate) return read(TryReadObject());
+    }
+
+    internal bool Update(Action<JsonObject> update, bool skipIfUnreadable = false)
+    {
+        lock (gate)
         {
-            return JsonNode.Parse(File.ReadAllText(ConfigPath)) as JsonObject;
-        }
-        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
-        {
-            return null;
+            Directory.CreateDirectory(directory);
+            var read = TryReadObjectDetailed();
+            if (read.Status == ConfigReadStatus.Unreadable)
+            {
+                if (skipIfUnreadable) return false;
+                throw read.Error!;
+            }
+            var root = read.Root ?? new JsonObject();
+            update(root);
+            var temporaryPath = Path.Combine(directory, $"config.{Guid.NewGuid():N}.tmp");
+            try
+            {
+                File.WriteAllText(temporaryPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                File.Move(temporaryPath, path, true);
+            }
+            finally
+            {
+                try { File.Delete(temporaryPath); } catch (IOException) { }
+            }
+            return true;
         }
     }
+
+    private JsonObject? TryReadObject() => TryReadObjectDetailed().Root;
+
+    private ConfigReadResult TryReadObjectDetailed()
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                return new(ConfigReadStatus.Readable, JsonNode.Parse(File.ReadAllText(path)) as JsonObject, null);
+            }
+            catch (JsonException)
+            {
+                return new(ConfigReadStatus.Corrupt, null, null);
+            }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                return new(ConfigReadStatus.Missing, null, null);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                if (attempt == 2) return new(ConfigReadStatus.Unreadable, null, exception);
+                Thread.Sleep(TimeSpan.FromMilliseconds(50));
+            }
+        }
+        throw new InvalidOperationException("The config read retry loop did not complete.");
+    }
+
+    private enum ConfigReadStatus { Missing, Readable, Corrupt, Unreadable }
+    private readonly record struct ConfigReadResult(ConfigReadStatus Status, JsonObject? Root, Exception? Error);
 }

@@ -41,6 +41,17 @@ document again.
   so the change survives a reload and shows up in git. If the file changed underneath you,
   the click is refused and the page reloads instead of overwriting the other change.
 
+## Windows and files
+
+- **Your window is remembered.** mdview reopens at the size and position you last closed it at, and
+  maximized if you closed it maximized. If that spot is no longer on any screen, it opens at the
+  default position instead. Extra windows open slightly offset so they do not stack exactly.
+- **Drag to open.** Drop a `.md` file from Explorer onto any mdview window to open it in a new
+  window (or bring its window forward if it is already open). Other file types are ignored.
+  Files dragged straight from a network folder (`\\server\share`) are ignored too, for safety;
+  copy the file locally, or use a mapped drive letter.
+- **Closing is instant.** mdview exits as soon as you close its last window.
+
 ## Editing
 
 Every document opens **Locked**, so you can read and click around without changing

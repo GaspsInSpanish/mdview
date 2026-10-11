@@ -190,3 +190,14 @@ the owner's desktop (`W1-WINDOW`). These are not:
 4. Double-click a second `.md` while one is open: the new window comes to the front.
 5. Drag the window between monitors with different scaling, if you have them: it
    resizes sensibly and the text stays sharp.
+
+## 9. Remembered windows and drag-to-open (v1.6) — what only hands can check
+
+Placement round-trips and maximize are checked automatically (`tools/WindowsBlackBox`). These are not:
+
+1. Drag a `.md` from Explorer onto an mdview window: it opens in a new window. Drag a `.txt`: nothing
+   happens. Drag the same `.md` again: its existing window comes forward instead of a duplicate.
+2. **Taskbar at the top** (or left): move a window, close it, reopen — it comes back in the same spot,
+   not shifted by the taskbar's height. (The review could not confirm this without a real run.)
+3. With two monitors, close a window on the second one and reopen it: it reopens there. Unplug or
+   disable that monitor and reopen: it opens on a visible screen instead.

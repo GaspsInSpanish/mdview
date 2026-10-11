@@ -56,9 +56,14 @@ if (args.Length == 1 && args[0] == "--transport")
     return await RunTransportChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--placement")
+{
+    return await RunPlacementChecksAsync();
+}
+
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --files | ServeProbe --edit | ServeProbe --transport | ServeProbe --browser | ServeProbe --handoff");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --placement | ServeProbe --files | ServeProbe --edit | ServeProbe --transport | ServeProbe --browser | ServeProbe --handoff");
     return 1;
 }
 
@@ -178,7 +183,188 @@ static async Task<int> RunTransportChecksAsync()
             _ => Ensure(Environment.CurrentManagedThreadId == callingThread,
                 "Host completion resumed off the calling synchronization-context thread.")));
     });
+    failed |= !await RunCheckAsync("transport-navigation-decisions", CheckNavigationDecisionsAsync);
     return failed ? 1 : 0;
+}
+
+static async Task CheckNavigationDecisionsAsync()
+{
+    var directory = CreateProbeDirectory("navigation");
+    try
+    {
+        var documentPath = Path.Combine(directory, "drop.md");
+        await File.WriteAllTextAsync(documentPath, "# dropped\n");
+        var decision = NavigationDecision.Decide(new Uri(documentPath).AbsoluteUri, DocumentHost.Origin);
+        Ensure(decision.Action == NavigationAction.OpenDocument &&
+            string.Equals(Path.GetFullPath(decision.Target!), Path.GetFullPath(documentPath), StringComparison.Ordinal),
+            "A supported existing file URI was not converted to its local path.");
+
+        var unsupported = Path.Combine(directory, "drop.txt");
+        await File.WriteAllTextAsync(unsupported, "text");
+        Ensure(NavigationDecision.Decide(new Uri(unsupported).AbsoluteUri, DocumentHost.Origin).Action == NavigationAction.Ignore,
+            "An unsupported file extension was accepted.");
+        Ensure(NavigationDecision.Decide(new Uri(Path.Combine(directory, "missing.md")).AbsoluteUri,
+            DocumentHost.Origin).Action == NavigationAction.Ignore, "A nonexistent file was accepted.");
+        Ensure(NavigationDecision.Decide($"{DocumentHost.Origin}/d/id", DocumentHost.Origin).Action == NavigationAction.Allow,
+            "The private origin was not allowed.");
+        Ensure(NavigationDecision.Decide("https://example.com", DocumentHost.Origin).Action == NavigationAction.OpenExternal,
+            "HTTPS was not external.");
+        Ensure(NavigationDecision.Decide("mailto:reader@example.com", DocumentHost.Origin).Action == NavigationAction.OpenExternal,
+            "mailto was not external.");
+        foreach (var target in new[] { "javascript:alert(1)", "data:text/plain,x", "ms-settings:display" })
+            Ensure(NavigationDecision.Decide(target, DocumentHost.Origin).Action == NavigationAction.Ignore,
+                $"A forbidden scheme was accepted: {target}");
+        // A file: URI with a host must be refused before any filesystem call: on Windows File.Exists on
+        // \\server\share contacts that server with the user's credentials. A recording stub proves no
+        // existence check happens (a real check would just say "missing" here and prove nothing).
+        foreach (var target in new[] { "file://attacker.invalid/share/a.md", "file:///%5C%5Cattacker.invalid/share/a.md",
+            "file://127.0.0.1/c$/a.md", "file:///%5C%5C%3F%5CUNC%5Cattacker.invalid%5Cshare%5Ca.md", "file:////attacker.invalid/share/a.md",
+            "file:///%5C%3F%3F%5CUNC%5Cattacker.invalid%5Cshare%5Ca.md" })
+        {
+            var touched = new List<string>();
+            var hostile = NavigationDecision.Decide(target, DocumentHost.Origin, path => { touched.Add(path); return true; });
+            Ensure(hostile.Action == NavigationAction.Ignore && touched.Count == 0,
+                $"A file URI with a host reached the filesystem or was opened: {target} (checked: {string.Join(", ", touched)})");
+        }
+        // Repeated separators after a drive letter are a local path on Windows (C:\\\x is C:\x), not a UNC
+        // smuggle; what matters is that the filesystem only ever sees the normalised local form.
+        if (OperatingSystem.IsWindows())
+        {
+            var seen = new List<string>();
+            NavigationDecision.Decide("file:///C:/%5C%5Cattacker.invalid%5Cshare%5Ca.md", DocumentHost.Origin,
+                path => { seen.Add(path); return false; });
+            Ensure(seen.All(path => path.Length > 2 && path[1] == ':' && !path.Contains(@"\\", StringComparison.Ordinal)),
+                $"A drive-letter path reached the filesystem un-normalised: {string.Join(", ", seen)}");
+        }
+        foreach (var target in new[] { "https://user@mdview.example/d/id", "https://mdview.example:444/d/id" })
+            Ensure(NavigationDecision.Decide(target, DocumentHost.Origin).Action != NavigationAction.Allow,
+                $"An origin authority trick was allowed: {target}");
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static async Task<int> RunPlacementChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("placement-round-trip", CheckPlacementRoundTripAsync);
+    failed |= !await RunCheckAsync("placement-shared-config-concurrency", CheckPlacementConcurrencyAsync);
+    failed |= !await RunCheckAsync("placement-malformed-values", CheckMalformedPlacementsAsync);
+    failed |= !await RunCheckAsync("placement-unreadable-config-preserved", CheckUnreadablePlacementConfigAsync);
+    failed |= !await RunCheckAsync("placement-monitor-and-cascade-rules", CheckPlacementRulesAsync);
+    return failed ? 1 : 0;
+}
+
+static Task CheckPlacementRoundTripAsync()
+{
+    var directory = CreateProbeDirectory("placement-roundtrip");
+    try
+    {
+        var store = new WindowPlacementStore(directory);
+        var expected = new SavedWindowPlacement(101, -42, 900, 650, true);
+        store.Write(expected);
+        Ensure(store.Read() == expected, "The saved placement did not round-trip.");
+    }
+    finally { TryDeleteDirectory(directory); }
+    return Task.CompletedTask;
+}
+
+static async Task CheckPlacementConcurrencyAsync()
+{
+    var directory = CreateProbeDirectory("placement-concurrency");
+    try
+    {
+        var configPath = Path.Combine(directory, "config.json");
+        await File.WriteAllTextAsync(configPath,
+            "{\"theme\":\"light\",\"unknown\":{\"path\":\"C:\\\\tools\\\\brave.exe\",\"values\":[1,true,null]}}");
+        var theme = new ThemeConfigStore(directory);
+        var placement = new WindowPlacementStore(directory);
+        var expected = new SavedWindowPlacement(40, 50, 800, 600, false);
+        var themeWrites = Task.Run(() => { for (var i = 0; i < 50; i++) theme.WriteTheme(ThemePreference.Dark); });
+        var placementWrites = Task.Run(() => { for (var i = 0; i < 50; i++) placement.Write(expected); });
+        await Task.WhenAll(themeWrites, placementWrites);
+        Ensure(theme.ReadTheme() == ThemePreference.Dark, "The interleaved theme write was lost.");
+        Ensure(placement.Read() == expected, "The interleaved placement write was lost.");
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(configPath));
+        var unknown = json.RootElement.GetProperty("unknown");
+        Ensure(unknown.GetProperty("path").GetString() == "C:\\tools\\brave.exe" &&
+            unknown.GetProperty("values")[1].GetBoolean(), "An unknown nested config value changed.");
+
+        theme.WriteTheme(ThemePreference.Light);
+        Ensure(placement.Read() == expected, "A later theme write removed the placement.");
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static async Task CheckMalformedPlacementsAsync()
+{
+    var directory = CreateProbeDirectory("placement-malformed");
+    try
+    {
+        var configPath = Path.Combine(directory, "config.json");
+        var invalid = new[]
+        {
+            "null", "[]", "{\"coordinateSpace\":\"screen\",\"x\":1}",
+            "{\"coordinateSpace\":\"screen\",\"x\":1,\"y\":2,\"width\":\"800\",\"height\":600,\"maximized\":false}",
+            "{\"coordinateSpace\":\"screen\",\"x\":1,\"y\":2,\"width\":-800,\"height\":600,\"maximized\":false}",
+            "{\"coordinateSpace\":\"screen\",\"x\":1,\"y\":2,\"width\":100001,\"height\":600,\"maximized\":false}",
+            "{\"coordinateSpace\":\"screen\",\"x\":1,\"y\":2,\"width\":800,\"height\":600,\"maximized\":\"yes\"}"
+        };
+        foreach (var window in invalid)
+        {
+            await File.WriteAllTextAsync(configPath, $"{{\"theme\":\"dark\",\"window\":{window}}}");
+            Ensure(new WindowPlacementStore(directory).Read() is null, $"Malformed placement was accepted: {window}");
+        }
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static async Task CheckUnreadablePlacementConfigAsync()
+{
+    var directory = CreateProbeDirectory("placement-unreadable");
+    try
+    {
+        var configPath = Path.Combine(directory, "config.json");
+        await File.WriteAllTextAsync(configPath, "{\"theme\":\"dark\",\"unknown\":{\"kept\":true}}");
+        using (var held = new FileStream(configPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            new WindowPlacementStore(directory).Write(new SavedWindowPlacement(20, 30, 800, 600, false));
+        }
+        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(configPath));
+        Ensure(json.RootElement.GetProperty("theme").GetString() == "dark" &&
+            json.RootElement.GetProperty("unknown").GetProperty("kept").GetBoolean(),
+            "An unreadable config was replaced by a placement write.");
+        Ensure(!json.RootElement.TryGetProperty("window", out _),
+            "A placement write unexpectedly succeeded while config.json was exclusively held.");
+    }
+    finally { TryDeleteDirectory(directory); }
+}
+
+static Task CheckPlacementRulesAsync()
+{
+    var placement = new SavedWindowPlacement(10, 20, 800, 600, false);
+    Ensure(WindowPlacementRules.CanRestore(placement, (_, _, _, _) => true),
+        "A valid placement intersecting a monitor was rejected.");
+    Ensure(!WindowPlacementRules.CanRestore(placement, (_, _, _, _) => false),
+        "An off-monitor placement was accepted.");
+    Ensure(!WindowPlacementRules.CanRestore(placement with { Width = 299 }, (_, _, _, _) => true),
+        "A placement below the minimum size was accepted.");
+    Ensure(!WindowPlacementRules.TryApply(() => throw new InvalidOperationException("injected apply failure")),
+        "A failing cosmetic placement apply escaped its best-effort boundary.");
+    var topTaskbar = WindowPlacementRules.WorkspaceToScreen(100, 80, 0, 0, 0, 40);
+    Ensure(topTaskbar == (100, 120), "Top-taskbar workspace coordinates were not converted to screen coordinates.");
+    var secondaryLeftTaskbar = WindowPlacementRules.WorkspaceToScreen(-1800, 50, -1920, 0, -1880, 0);
+    Ensure(secondaryLeftTaskbar == (-1760, 50),
+        "Negative secondary-monitor workspace coordinates were not converted with its left work-area offset.");
+    var cascaded = WindowPlacementRules.Cascade(placement, [(10, 20), (42, 52)], 32, 0, 0, 1000, 800);
+    Ensure(cascaded.X == 74 && cascaded.Y == 84, "The cascade did not skip occupied top-left positions.");
+    var clamped = WindowPlacementRules.Cascade(placement with { X = 900, Y = 700 }, [(900, 700)], 32,
+        0, 0, 1000, 800);
+    Ensure(clamped.X == 200 && clamped.Y == 200, "The cascade was not kept inside the monitor work area.");
+    var edgeOccupied = WindowPlacementRules.Cascade(placement with { X = 200, Y = 200 }, [(200, 200)], 32,
+        0, 0, 1000, 800);
+    Ensure(edgeOccupied != placement with { X = 200, Y = 200 },
+        "A clamped cascade ended on an occupied bottom-right position.");
+    return Task.CompletedTask;
 }
 
 static async Task<int> RunSecurityChecksAsync()

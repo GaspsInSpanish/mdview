@@ -19,6 +19,7 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
     private readonly Dictionary<nint, WindowState> windows = [];
     private readonly OpeningDocumentGuard openingDocuments = new();
     private readonly PendingLaunchSet pendingLaunches = new();
+    private readonly WindowPlacementStore placementStore = new();
     private readonly WebViewNative.WindowProcedure windowProcedure;
     private readonly Thread uiThread;
     private nint dispatcherWindow;
@@ -200,6 +201,7 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
             var uri = new Uri(launch.Url);
             state = new WindowState(uri.GetLeftPart(UriPartial.Authority), documentId, launch);
             windows.Add(window, state);
+            _ = WindowPlacementRules.TryApply(() => RestorePlacement(window));
             var created = state;
             var createdWindow = window;
             launch.Ticket.WhenAbandoned.Register(() => PostToUi(() => CloseIfUnconnected(createdWindow, created)));
@@ -319,45 +321,49 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
 
     private void HandleNavigation(WindowState state, CoreWebView2NavigationStartingEventArgs eventArgs)
     {
-        if (IsOwnOrigin(eventArgs.Uri, state.Origin))
+        var decision = NavigationDecision.Decide(eventArgs.Uri, state.Origin);
+        if (decision.Action == NavigationAction.Allow)
         {
             var id = DocumentIdFromUrl(eventArgs.Uri);
             if (id.Length != 0) state.DocumentId = id;
             return;
         }
         eventArgs.Cancel = true;
-        OpenExternalIfAllowed(eventArgs.Uri);
+        ApplyNavigationDecision(decision);
     }
 
     private void HandleNewWindow(WindowState state, CoreWebView2NewWindowRequestedEventArgs eventArgs)
     {
         eventArgs.Handled = true;
-        if (IsOwnOrigin(eventArgs.Uri, state.Origin))
+        var decision = NavigationDecision.Decide(eventArgs.Uri, state.Origin);
+        if (decision.Action == NavigationAction.Allow)
         {
             state.WebView?.Navigate(eventArgs.Uri);
             return;
         }
 
-        OpenExternalIfAllowed(eventArgs.Uri);
+        ApplyNavigationDecision(decision);
     }
 
-    private void OpenExternalIfAllowed(string target)
+    private void ApplyNavigationDecision(NavigationDecision decision)
     {
-        if (!Uri.TryCreate(target, UriKind.Absolute, out var uri) ||
-            uri.Scheme is not ("http" or "https" or "mailto")) return;
+        if (decision.Action == NavigationAction.OpenDocument && decision.Target is not null)
+            host.OpenFromHandOff(decision.Target);
+        else if (decision.Action == NavigationAction.OpenExternal && decision.Target is not null)
+            OpenExternal(decision.Target);
+    }
+
+    private void OpenExternal(string target)
+    {
         try
         {
-            Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
         }
         catch (Exception exception)
         {
             reportMessage?.Invoke($"The link could not be opened: {exception.Message}");
         }
     }
-
-    private static bool IsOwnOrigin(string target, string origin) =>
-        Uri.TryCreate(target, UriKind.Absolute, out var uri) &&
-        string.Equals(uri.GetLeftPart(UriPartial.Authority), origin, StringComparison.OrdinalIgnoreCase);
 
     private void HandleProcessFailed(nint window, WindowState state, CoreWebView2ProcessFailedEventArgs eventArgs)
     {
@@ -471,6 +477,7 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
 
     private void DestroyState(nint window, WindowState state)
     {
+        SavePlacement(window);
         state.Destroyed = true;
         try { state.Controller?.Close(); }
         catch (Exception exception) { SafeReport($"The WebView2 controller could not close cleanly: {exception.Message}"); }
@@ -494,6 +501,89 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
             shutdown?.Invoke();
         }
     }
+
+    private void RestorePlacement(nint window)
+    {
+        var saved = placementStore.Read();
+        if (saved is null || !WindowPlacementRules.CanRestore(saved.Value, IntersectsMonitor)) return;
+
+        var rect = ToRect(saved.Value);
+        var monitor = WebViewNative.MonitorFromRect(ref rect, WebViewNative.MonitorDefaultToNull);
+        var info = new WebViewNative.MonitorInfo { Size = (uint)Marshal.SizeOf<WebViewNative.MonitorInfo>() };
+        if (monitor == 0 || !WebViewNative.GetMonitorInfoW(monitor, ref info)) return;
+
+        var occupied = new List<(int X, int Y)>();
+        foreach (var existing in windows.Keys.Where(handle => handle != window))
+        {
+            var existingPlacement = EmptyNativePlacement();
+            var existingMonitor = WebViewNative.MonitorFromWindow(existing, WebViewNative.MonitorDefaultToNearest);
+            var existingInfo = new WebViewNative.MonitorInfo { Size = (uint)Marshal.SizeOf<WebViewNative.MonitorInfo>() };
+            if (WebViewNative.GetWindowPlacement(existing, ref existingPlacement) && existingMonitor != 0 &&
+                WebViewNative.GetMonitorInfoW(existingMonitor, ref existingInfo))
+            {
+                occupied.Add(WindowPlacementRules.WorkspaceToScreen(
+                    existingPlacement.NormalPosition.Left, existingPlacement.NormalPosition.Top,
+                    existingInfo.Monitor.Left, existingInfo.Monitor.Top,
+                    existingInfo.Work.Left, existingInfo.Work.Top));
+            }
+        }
+        var dpi = WebViewNative.GetDpiForWindow(window);
+        var offset = Math.Max(1, (int)Math.Round(32 * dpi / 96.0));
+        var restored = WindowPlacementRules.Cascade(saved.Value, occupied, offset,
+            info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom);
+        // A subsequent WM_DPICHANGED may apply Windows' suggested rectangle on mixed-DPI desktops.
+        if (!WebViewNative.SetWindowPos(window, 0, restored.X, restored.Y, restored.Width, restored.Height,
+            WebViewNative.SwpNoZOrder | WebViewNative.SwpNoActivate)) return;
+        if (!restored.Maximized) return;
+
+        // GetWindowPlacement converts the screen rectangle applied above to the workspace coordinates it requires.
+        var placement = EmptyNativePlacement();
+        if (!WebViewNative.GetWindowPlacement(window, ref placement)) return;
+        placement.ShowCommand = WebViewNative.SwShowMaximized;
+        _ = WebViewNative.SetWindowPlacement(window, ref placement);
+    }
+
+    private void SavePlacement(nint window)
+    {
+        try
+        {
+            var placement = EmptyNativePlacement();
+            if (!WebViewNative.GetWindowPlacement(window, ref placement)) return;
+            var rect = placement.NormalPosition;
+            var monitor = WebViewNative.MonitorFromWindow(window, WebViewNative.MonitorDefaultToNearest);
+            var info = new WebViewNative.MonitorInfo { Size = (uint)Marshal.SizeOf<WebViewNative.MonitorInfo>() };
+            if (monitor == 0 || !WebViewNative.GetMonitorInfoW(monitor, ref info)) return;
+            // WINDOWPLACEMENT is workspace-relative; config.json stores screen coordinates.
+            var (x, y) = WindowPlacementRules.WorkspaceToScreen(rect.Left, rect.Top,
+                info.Monitor.Left, info.Monitor.Top, info.Work.Left, info.Work.Top);
+            var width = rect.Right - rect.Left;
+            var height = rect.Bottom - rect.Top;
+            if (width < WindowPlacementRules.MinimumWidth || height < WindowPlacementRules.MinimumHeight) return;
+            var restoreMaximized = placement.ShowCommand == WebViewNative.SwShowMaximized ||
+                (placement.Flags & WebViewNative.WindowPlacementRestoreToMaximized) != 0;
+            placementStore.Write(new SavedWindowPlacement(x, y, width, height, restoreMaximized));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+    }
+
+    private static bool IntersectsMonitor(int x, int y, int width, int height)
+    {
+        var rect = new WebViewNative.Rect { Left = x, Top = y, Right = x + width, Bottom = y + height };
+        return WebViewNative.MonitorFromRect(ref rect, WebViewNative.MonitorDefaultToNull) != 0;
+    }
+
+    private static WebViewNative.Rect ToRect(SavedWindowPlacement placement) => new()
+    {
+        Left = placement.X,
+        Top = placement.Y,
+        Right = placement.X + placement.Width,
+        Bottom = placement.Y + placement.Height
+    };
+
+    private static WebViewNative.WindowPlacement EmptyNativePlacement() => new()
+    {
+        Length = (uint)Marshal.SizeOf<WebViewNative.WindowPlacement>()
+    };
 
     private static void ResizeController(nint window, WindowState state)
     {

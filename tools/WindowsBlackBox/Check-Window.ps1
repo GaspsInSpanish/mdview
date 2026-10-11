@@ -21,6 +21,11 @@ public static class MdViewBlackBox {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc p, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+  public static string Rect(IntPtr h) { RECT r; GetWindowRect(h, out r); return r.l + "," + r.t + "," + (r.r - r.l) + "," + (r.b - r.t); }
   // Text of a dialog's child controls (a MessageBox's message is a Static child), read via Win32.
   public static string DialogText(IntPtr dialog) {
     var parts = new List<string>();
@@ -57,8 +62,15 @@ function Check($name, $passed, $detail) { $results[$name] = [ordered]@{ passed =
 # For a check whose precondition the harness cannot control (see keyboard focus): not a pass, not a failure.
 function Unmeasured($name, $detail) { $results[$name] = [ordered]@{ passed = $null; detail = "UNMEASURED: $detail" } }
 function Windows($id) { [MdViewBlackBox]::Windows([uint32]$id) }
-function Finish { $results | ConvertTo-Json -Depth 4; if (@($results.Values | Where-Object { $_.passed -eq $false }).Count) { exit 1 } else { exit 0 } }
+function Finish { Restore-OwnerConfig; $results | ConvertTo-Json -Depth 4; if (@($results.Values | Where-Object { $_.passed -eq $false }).Count) { exit 1 } else { exit 0 } }
 $utf8 = New-Object System.Text.UTF8Encoding $false
+# Every mdview window that closes writes its placement into the owner's real %APPDATA%\mdview\config.json
+# (W3b). Back it up before the first window opens and restore it in Finish, on every path.
+$config = Join-Path $env:APPDATA 'mdview\config.json'
+$configBackup = if (Test-Path $config) { [IO.File]::ReadAllBytes($config) } else { $null }
+function Restore-OwnerConfig {
+  try { if ($null -ne $configBackup) { [IO.File]::WriteAllBytes($config, $configBackup) } elseif (Test-Path $config) { Remove-Item $config } } catch { }
+}
 $docA = Join-Path $WorkDir 'Black box alpha.md'
 $docB = Join-Path $WorkDir 'Black box beta.md'
 [IO.File]::WriteAllText($docA, "# Alpha`r`n`r`n- [ ] tick me`r`n`r`nAlpha body.`r`n", $utf8)
@@ -157,6 +169,38 @@ $left = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Wh
 Check 'no-webview2-processes-left' ($left.Count -eq 0) ("msedgewebview2 with the mdview profile: {0}" -f $left.Count)
 $profile = Join-Path $env:LOCALAPPDATA 'mdview\WebView2'
 Check 'profile-folder-location' (Test-Path $profile) $profile
+
+# Remembered placement (W3b). This writes the owner's real %APPDATA%\mdview\config.json, so it is
+# backed up first and restored afterwards whatever happens. Moving a window with SetWindowPos and
+# maximizing it are window-manager calls, not user input.
+function Open-And-Wait($doc, $title) {
+  $proc = Start-Process -FilePath $Exe -ArgumentList "`"$doc`"" -PassThru
+  $deadline = (Get-Date).AddSeconds(20); $w = $null
+  while ((Get-Date) -lt $deadline -and -not $w) { Start-Sleep -Milliseconds 300; $w = Windows $proc.Id | Where-Object { $_ -match "\|$title" } | Select-Object -First 1 }
+  Start-Sleep -Milliseconds 800
+  return @($proc, $(if ($w) { [IntPtr][long]($w.Split('|')[0]) } else { [IntPtr]::Zero }))
+}
+function Close-And-Wait($proc, $hwnd) { [void][MdViewBlackBox]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero); [void]$proc.WaitForExit(15000) }
+try {
+  $first = Open-And-Wait $docB 'Black box beta'
+  if ($first[1] -eq [IntPtr]::Zero) { Check 'placement-restored' $false 'window did not open'; Check 'maximized-restored' $false 'window did not open' }
+  else {
+    [void][MdViewBlackBox]::SetWindowPos($first[1], [IntPtr]::Zero, 160, 120, 880, 640, 0x0014)  # NOZORDER|NOACTIVATE
+    Start-Sleep -Milliseconds 500
+    $set = [MdViewBlackBox]::Rect($first[1])
+    Close-And-Wait $first[0] $first[1]
+    $second = Open-And-Wait $docB 'Black box beta'
+    $got = [MdViewBlackBox]::Rect($second[1])
+    Check 'placement-restored' ($got -eq $set) "set=$set reopened=$got"
+    [void][MdViewBlackBox]::ShowWindow($second[1], 3)  # SW_MAXIMIZE
+    Start-Sleep -Milliseconds 500
+    Close-And-Wait $second[0] $second[1]
+    $third = Open-And-Wait $docB 'Black box beta'
+    Check 'maximized-restored' ([MdViewBlackBox]::IsZoomed($third[1])) "reopened maximized=$([MdViewBlackBox]::IsZoomed($third[1]))"
+    Close-And-Wait $third[0] $third[1]
+  }
+}
+finally { Restore-OwnerConfig }
 
 # WebView2 unavailable on the first launch: the user must get the download prompt *before* the
 # process exits (W2b review R1: a prompt posted to the background UI thread died with the process).
