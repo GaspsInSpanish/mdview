@@ -12,6 +12,7 @@ var markdown = await File.ReadAllTextAsync(args[0]);
 var title = Path.GetFileNameWithoutExtension(args[0]);
 var document = Renderer.RenderDocument(markdown, title);
 ValidateMenuShell(document);
+ValidateTitleBar();
 ValidateEditFeatures(document);
 ValidateThemeRendering(markdown, title);
 ValidateAlerts();
@@ -28,6 +29,30 @@ Console.WriteLine("render-frontmatter=passed");
 Console.WriteLine("render-extensions=passed");
 Console.WriteLine("render-source-ranges=passed");
 return 0;
+
+static void ValidateTitleBar()
+{
+    const string title = "unsafe <script>alert(1)</script> & title";
+    var html = Renderer.RenderDocument("# body", title);
+    var header = html.IndexOf("<header class=\"title-bar\"", StringComparison.Ordinal);
+    var menu = html.IndexOf("<nav class=\"menu-bar\"", StringComparison.Ordinal);
+    var reader = html.IndexOf("<main id=\"reader-content\"", StringComparison.Ordinal);
+    Ensure(header >= 0 && html.IndexOf("<header class=\"title-bar\"", header + 1, StringComparison.Ordinal) < 0,
+        "Title bar was missing or duplicated.");
+    Ensure(header < menu && menu < reader, "Title bar, menu, and reader were not in chrome/content order.");
+    Ensure(html.Contains("unsafe &lt;script&gt;alert(1)&lt;/script&gt; &amp; title - mdview", StringComparison.Ordinal),
+        "Title-bar text was not HTML encoded.");
+    Ensure(Regex.Matches(html[header..menu], "<button\\b", RegexOptions.IgnoreCase).Count == 3,
+        "Title bar did not contain exactly three buttons.");
+    foreach (var command in new[] { "minimize", "maximize", "close" })
+        Ensure(html[header..menu].Contains($"tabindex=\"-1\" data-window-command=\"{command}\"", StringComparison.Ordinal),
+            $"Title-bar command {command} was missing.");
+    Ensure(Assets.LoadTheme().Contains("user-select: none", StringComparison.Ordinal),
+        "Title bar did not disable text selection.");
+    var start = html.IndexOf("<main id=\"reader-content\"", StringComparison.Ordinal);
+    var end = html.IndexOf("</main>", start, StringComparison.Ordinal);
+    Ensure(!html[start..end].Contains("title-bar", StringComparison.Ordinal), "Application chrome appeared inside reader content.");
+}
 
 static void ValidateMenuShell(string html)
 {

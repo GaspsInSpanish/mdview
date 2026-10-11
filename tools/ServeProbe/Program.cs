@@ -61,9 +61,14 @@ if (args.Length == 1 && args[0] == "--placement")
     return await RunPlacementChecksAsync();
 }
 
+if (args.Length == 1 && args[0] == "--frame")
+{
+    return await RunFrameChecksAsync();
+}
+
 if (args.Length != 1)
 {
-    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --placement | ServeProbe --files | ServeProbe --edit | ServeProbe --transport | ServeProbe --browser | ServeProbe --handoff");
+    Console.Error.WriteLine("Usage: ServeProbe <input.md> | ServeProbe --lifecycle <input.md> | ServeProbe --toggle | ServeProbe --security | ServeProbe --theme | ServeProbe --placement | ServeProbe --frame | ServeProbe --files | ServeProbe --edit | ServeProbe --transport | ServeProbe --browser | ServeProbe --handoff");
     return 1;
 }
 
@@ -84,6 +89,50 @@ using (var host = new DocumentHost(() => DocumentHost.Origin))
 }
 
 return 0;
+
+static async Task<int> RunFrameChecksAsync()
+{
+    var failed = false;
+    failed |= !await RunCheckAsync("frame-message-validation", () =>
+    {
+        const string origin = "https://mdview.example";
+        foreach (var command in new[] { "minimize", "maximize", "restore", "close" })
+            Ensure(WindowFrameProtocol.Parse(origin + "/d/x", JsonSerializer.Serialize(new { type = "window", command }), origin).Kind == FrameMessageKind.WindowCommand,
+                $"Window command {command} was rejected.");
+        var valid = "{\"type\":\"frame-colors\",\"face\":\"#C9C5B9\",\"hiOuter\":\"#FFFFFF\",\"hiInner\":\"#E7E3D9\",\"loInner\":\"#A8A499\",\"loOuter\":\"#88847A\"}";
+        Ensure(WindowFrameProtocol.Parse(origin + "/", valid, origin).Kind == FrameMessageKind.FrameColors, "Valid frame colors were rejected.");
+        foreach (var invalid in new[] { valid.Replace("#FFFFFF", "red"), valid.Replace("#FFFFFF", "#FFF"), valid.Replace("#FFFFFF", "#GGGGGG"), valid.Replace(",\"loOuter\":\"#88847A\"", ""), valid[..^1] + ",\"evil\":\"<script>\"}", "{\"type\":\"window\",\"command\":\"script\"}", "{\"type\":7}" })
+            Ensure(WindowFrameProtocol.Parse(origin + "/", invalid, origin).Kind == FrameMessageKind.Ignore, $"Invalid message was accepted: {invalid}");
+        Ensure(WindowFrameProtocol.Parse("https://attacker.example/", valid, origin).Kind == FrameMessageKind.Ignore, "Foreign source was accepted.");
+        return Task.CompletedTask;
+    });
+    failed |= !await RunCheckAsync("frame-hit-testing", () =>
+    {
+        var cases = new[] { (1, 50, WindowFrameHitTest.Left), (198, 50, WindowFrameHitTest.Right), (100, 1, WindowFrameHitTest.Top),
+            (100, 98, WindowFrameHitTest.Bottom), (1, 1, WindowFrameHitTest.TopLeft), (198, 1, WindowFrameHitTest.TopRight),
+            (1, 98, WindowFrameHitTest.BottomLeft), (198, 98, WindowFrameHitTest.BottomRight), (100, 50, WindowFrameHitTest.Client) };
+        foreach (var (x, y, expected) in cases) Ensure(WindowFrameHitTest.Test(x, y, 200, 100, 96, false) == expected, $"Hit test failed at {x},{y}.");
+        foreach (var (x, y, _) in cases) Ensure(WindowFrameHitTest.Test(x, y, 200, 100, 192, true) == WindowFrameHitTest.Client, "Maximized hit test returned resize code.");
+        Ensure(WindowFrameHitTest.Test(7, 30, 400, 200, 192, false) == WindowFrameHitTest.Left, "DPI-scaled band was not used.");
+        return Task.CompletedTask;
+    });
+    failed |= !await RunCheckAsync("frame-auto-hide-insets", () =>
+    {
+        var work = new FrameRectangle(10, 20, 1930, 1060);
+        Ensure(AutoHideTaskbarInsets.Apply(work, false, false, false, false) == work,
+            "A work area without an auto-hide taskbar changed.");
+        Ensure(AutoHideTaskbarInsets.Apply(work, false, false, false, true) == new FrameRectangle(10, 20, 1930, 1059),
+            "Bottom auto-hide taskbar did not reserve one pixel.");
+        Ensure(AutoHideTaskbarInsets.Apply(work, false, true, false, false) == new FrameRectangle(10, 21, 1930, 1060),
+            "Top auto-hide taskbar did not reserve one pixel.");
+        Ensure(AutoHideTaskbarInsets.Apply(work, true, false, false, false) == new FrameRectangle(11, 20, 1930, 1060),
+            "Left auto-hide taskbar did not reserve one pixel.");
+        Ensure(AutoHideTaskbarInsets.Apply(work, false, false, true, false) == new FrameRectangle(10, 20, 1929, 1060),
+            "Right auto-hide taskbar did not reserve one pixel.");
+        return Task.CompletedTask;
+    });
+    return failed ? 1 : 0;
+}
 
 static async Task<int> RunToggleChecksAsync()
 {

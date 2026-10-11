@@ -11,6 +11,11 @@
   --bevel-hi-inner: #E7E3D9;
   --bevel-lo-inner: #A8A499;
   --bevel-lo-outer: #88847A;
+  --title-active-start: #000080;
+  --title-active-end: #0F79BF; /* Win98 used #1084D0; 8% darker so white title text clears WCAG AA (4.66:1, was 4.01) */
+  --title-inactive-start: #808080;
+  --title-inactive-end: #C0C0C0;
+  --title-text: #FFFFFF;
   --alert-note: #396BAF;
   --alert-tip: #2C784C;
   --alert-important: #7B4FCF;
@@ -28,6 +33,10 @@
   --dark-bevel-hi-inner: #505049;
   --dark-bevel-lo-inner: #222220;
   --dark-bevel-lo-outer: #0C0C0B;
+  --dark-title-active-start: #101B3F;
+  --dark-title-active-end: #29466B;
+  --dark-title-inactive-start: #404040;
+  --dark-title-inactive-end: #666666;
   --dark-alert-note: #7FAEE8;
   --dark-alert-tip: #63C38A;
   --dark-alert-important: #B795F0;
@@ -50,6 +59,10 @@
     --bevel-hi-inner: var(--dark-bevel-hi-inner);
     --bevel-lo-inner: var(--dark-bevel-lo-inner);
     --bevel-lo-outer: var(--dark-bevel-lo-outer);
+    --title-active-start: var(--dark-title-active-start);
+    --title-active-end: var(--dark-title-active-end);
+    --title-inactive-start: var(--dark-title-inactive-start);
+    --title-inactive-end: var(--dark-title-inactive-end);
     --alert-note: var(--dark-alert-note);
     --alert-tip: var(--dark-alert-tip);
     --alert-important: var(--dark-alert-important);
@@ -74,6 +87,10 @@
   --bevel-hi-inner: var(--dark-bevel-hi-inner);
   --bevel-lo-inner: var(--dark-bevel-lo-inner);
   --bevel-lo-outer: var(--dark-bevel-lo-outer);
+  --title-active-start: var(--dark-title-active-start);
+  --title-active-end: var(--dark-title-active-end);
+  --title-inactive-start: var(--dark-title-inactive-start);
+  --title-inactive-end: var(--dark-title-inactive-end);
   --alert-note: var(--dark-alert-note);
   --alert-tip: var(--dark-alert-tip);
   --alert-important: var(--dark-alert-important);
@@ -96,13 +113,79 @@ body {
 main {
   max-width: 46rem;
   margin: 0 auto;
-  padding: 4rem 1.5rem 8rem;
+  padding: 5.25rem 1.5rem 8rem;
 }
+
+.title-bar {
+  position: fixed;
+  z-index: 1001;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  height: 1.25rem;
+  padding: 2px;
+  gap: 2px;
+  overflow: hidden;
+  background: linear-gradient(to right, var(--title-active-start), var(--title-active-end));
+  color: var(--title-text);
+  font-family: "Segoe UI", sans-serif;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  app-region: drag;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+:root[data-window-active="false"] .title-bar {
+  background: linear-gradient(to right, var(--title-inactive-start), var(--title-inactive-end));
+}
+
+.title-bar-text {
+  min-width: 0;
+  margin-right: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title-bar-button {
+  position: relative;
+  flex: 0 0 1rem;
+  width: 1rem;
+  height: 0.875rem;
+  padding: 0;
+  border: 1px solid;
+  border-color: var(--bevel-hi-outer) var(--bevel-lo-outer) var(--bevel-lo-outer) var(--bevel-hi-outer);
+  background: var(--bevel-face);
+  box-shadow: inset 1px 1px 0 var(--bevel-hi-inner), inset -1px -1px 0 var(--bevel-lo-inner);
+  color: var(--text);
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}
+
+.title-bar-button:active {
+  border-color: var(--bevel-lo-outer) var(--bevel-hi-outer) var(--bevel-hi-outer) var(--bevel-lo-outer);
+  box-shadow: inset 1px 1px 0 var(--bevel-lo-inner), inset -1px -1px 0 var(--bevel-hi-inner);
+}
+
+.title-bar-button::before,
+.title-bar-button::after { position: absolute; content: ""; }
+.title-bar-button[data-window-command="minimize"]::before { right: 3px; bottom: 2px; left: 3px; border-bottom: 2px solid currentColor; }
+.title-bar-button[data-window-command="maximize"]::before { inset: 2px 3px; border: 1px solid currentColor; border-top-width: 2px; }
+.title-bar-button[data-window-command="restore"]::before { top: 2px; right: 2px; width: 6px; height: 5px; border: 1px solid currentColor; border-top-width: 2px; }
+.title-bar-button[data-window-command="restore"]::after { bottom: 1px; left: 2px; width: 6px; height: 5px; border: 1px solid currentColor; border-top-width: 2px; background: var(--bevel-face); }
+.title-bar-button[data-window-command="close"] { margin-left: 2px; }
+.title-bar-button[data-window-command="close"]::before,
+.title-bar-button[data-window-command="close"]::after { top: 2px; left: 7px; height: 8px; border-left: 1px solid currentColor; transform: rotate(45deg); }
+.title-bar-button[data-window-command="close"]::after { transform: rotate(-45deg); }
 
 .menu-bar {
   position: fixed;
   z-index: 1000;
-  top: 0;
+  top: 1.25rem;
   right: 0;
   left: 0;
   display: flex;
@@ -223,7 +306,7 @@ main {
 .find-bar {
   position: fixed;
   z-index: 999;
-  top: 2.5rem;
+  top: 3.75rem;
   right: 0.5rem;
   display: flex;
   align-items: center;

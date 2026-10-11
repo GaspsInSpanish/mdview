@@ -59,6 +59,7 @@ public static class Renderer
         html.AppendLine("</style>");
         html.AppendLine("</head>");
         html.AppendLine("<body tabindex=\"-1\">");
+        AppendTitleBar(html, title);
         AppendMenuBar(html, theme);
         AppendFindBar(html);
         html.AppendLine("<main id=\"reader-content\" tabindex=\"-1\">");
@@ -69,6 +70,7 @@ public static class Renderer
         html.Append("window.mdviewEdit={hash:").Append(System.Text.Json.JsonSerializer.Serialize(sourceHash)).AppendLine("};");
         html.AppendLine("</script>");
         AppendScript(html, cspNonce, Assets.LoadScript("page.js"));
+        AppendScript(html, cspNonce, Assets.LoadScript("titlebar.js"));
         AppendScript(html, cspNonce, Assets.LoadScript("fold.js"));
         AppendScript(html, cspNonce, Assets.LoadScript("menu.js"));
         AppendScript(html, cspNonce, Assets.LoadScript("edit.js"));
@@ -81,6 +83,16 @@ public static class Renderer
         html.AppendLine("</body>");
         html.AppendLine("</html>");
         return html.ToString();
+    }
+
+    private static void AppendTitleBar(StringBuilder html, string title)
+    {
+        html.AppendLine("<header class=\"title-bar\">");
+        html.Append("<span class=\"title-bar-text\">").Append(HtmlEncoder.Default.Encode(title)).AppendLine(" - mdview</span>");
+        foreach (var (command, label) in new[] { ("minimize", "Minimize"), ("maximize", "Maximize"), ("close", "Close") })
+            html.Append("<button class=\"title-bar-button\" type=\"button\" tabindex=\"-1\" data-window-command=\"").Append(command)
+                .Append("\" aria-label=\"").Append(label).AppendLine("\"></button>");
+        html.AppendLine("</header>");
     }
 
     /// <summary>Renders only the reader body, as edit mode swaps it in after a change.</summary>

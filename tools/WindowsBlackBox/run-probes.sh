@@ -17,7 +17,7 @@ dotnet publish "$repo/tools/ServeProbe" -c Release -r win-x64 --self-contained -
 printf '# Lifecycle\r\n\r\nx\r\n' > "$work/life.md"
 cd "$work"
 status=0
-for suite in --placement --transport --theme --toggle --security --files --edit --browser --handoff \
+for suite in --frame --placement --transport --theme --toggle --security --files --edit --browser --handoff \
   "--lifecycle $(wslpath -w "$work/life.md")"; do
   # shellcheck disable=SC2086
   out="$(./ServeProbe.exe $suite 2>&1 | tr -d '\r')"; code=$?

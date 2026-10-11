@@ -42,6 +42,15 @@ try
 
     foreach (var width in new[] { 500, 800, 1200 })
     {
+        var titlePath = Path.Combine(probeDirectory, $"probe-title-{width}.html");
+        await File.WriteAllTextAsync(titlePath, CreateTitleDiagnosticDocument(), new UTF8Encoding(false));
+        var title = await RunBraveAsync<TitleResult>(brave, titlePath, width, "data-title-result");
+        ValidateTitle(title);
+        Console.WriteLine($"geometry-title-{title.InnerWidth:0.##}=passed");
+    }
+
+    foreach (var width in new[] { 500, 800, 1200 })
+    {
         var foldPath = Path.Combine(probeDirectory, $"probe-fold-{width}.html");
         await File.WriteAllTextAsync(foldPath, CreateFoldDiagnosticDocument(), new UTF8Encoding(false));
         var fold = await RunBraveAsync<FoldResult>(brave, foldPath, width, "data-fold-result");
@@ -74,6 +83,47 @@ finally
 }
 
 return 0;
+
+static string CreateTitleDiagnosticDocument()
+{
+    var html = Renderer.RenderDocument("# First content\n\nText.", new string('W', 200));
+    var nonce = Regex.Match(html, """<script\s+nonce="(?<nonce>[^"]+)""", RegexOptions.IgnoreCase).Groups["nonce"].Value;
+    var script = $$"""
+<script nonce="{{nonce}}">
+(() => {
+ const rect = e => { const r=e.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom}; };
+ const style = e => getComputedStyle(e);
+ const luminance = value => { const rgb=value.match(/[0-9a-f]{2}/gi).map(x=>parseInt(x,16)/255).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4); return .2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2]; };
+ const contrast = (a,b) => (Math.max(luminance(a),luminance(b))+.05)/(Math.min(luminance(a),luminance(b))+.05);
+ const root=document.documentElement, bar=document.querySelector('.title-bar'), text=document.querySelector('.title-bar-text'), buttons=[...document.querySelectorAll('.title-bar-button')], menu=document.querySelector('.menu-bar'), first=document.querySelector('#reader-content').firstElementChild;
+ const capture = () => ({ background:style(bar).backgroundImage, activeStart:style(root).getPropertyValue('--title-active-start').trim(), activeEnd:style(root).getPropertyValue('--title-active-end').trim(), textColor:style(root).getPropertyValue('--title-text').trim() });
+ const before=capture(); window.mdviewApplyWindowState({maximized:true,active:false}); const after=capture();
+ const face=style(root).getPropertyValue('--bevel-face').trim(), hi=style(root).getPropertyValue('--bevel-hi-outer').trim(), lo=style(root).getPropertyValue('--bevel-lo-outer').trim();
+ const result={innerWidth,clientWidth:document.documentElement.clientWidth,bar:rect(bar),text:rect(text),textOverflow:style(text).textOverflow,menu:rect(menu),first:rect(first),buttons:buttons.map(b=>({rect:rect(b),command:b.dataset.windowCommand,label:b.ariaLabel,app:style(b).getPropertyValue('app-region'),webkit:style(b).webkitAppRegion})),app:style(bar).getPropertyValue('app-region'),webkit:style(bar).webkitAppRegion,before,after,contrastStart:contrast(before.textColor,before.activeStart),contrastEnd:contrast(before.textColor,before.activeEnd),bevelHighlight:contrast(face,hi),bevelShadow:contrast(face,lo)};
+ root.setAttribute('data-title-result',btoa(JSON.stringify(result)));
+})();
+</script>
+""";
+    return html.Replace("</body>", script + "</body>", StringComparison.Ordinal);
+}
+
+static void ValidateTitle(TitleResult result)
+{
+    // A fixed full-width bar spans the viewport *excluding* the page's vertical scrollbar (clientWidth),
+    // not innerWidth, which includes it (~15 px in headless Brave), exactly as the menu bar does.
+    Ensure(Math.Abs(result.Bar.Y) <= 0.5 && Math.Abs(result.Bar.Width - result.ClientWidth) <= 1,
+        $"Title bar does not span the viewport at y=0: bar y={result.Bar.Y} width={result.Bar.Width}, clientWidth={result.ClientWidth}, innerWidth={result.InnerWidth}.");
+    Ensure(result.Bar.Height is >= 18 and <= 24, $"Title bar height was {result.Bar.Height}.");
+    Ensure(result.Buttons.Length == 3 && result.Buttons.All(button => button.Rect.X >= 0 && button.Rect.Right <= result.InnerWidth + 0.5), "Caption button is off-screen.");
+    Ensure(result.Buttons[0].Command == "minimize" && result.Buttons[1].Command == "restore" && result.Buttons[2].Command == "close", "Caption button order/state was wrong.");
+    Ensure(result.Buttons[1].Label == "Restore" && result.Text.Right <= result.Buttons[0].Rect.X + 0.5 && result.TextOverflow == "ellipsis", "Title did not ellipsize clear of buttons.");
+    Ensure(Math.Abs(result.Menu.Y - result.Bar.Bottom) <= 1 && result.First.Y >= result.Menu.Bottom, "Menu/content overlaps title chrome.");
+    Ensure(result.App == "drag" || result.Webkit == "drag", "Title bar is not a drag region.");
+    Ensure(result.Buttons.All(button => button.App == "no-drag" || button.Webkit == "no-drag"), "Caption button is not no-drag.");
+    Ensure(result.Before.Background != result.After.Background, "Inactive title colors did not apply.");
+    Ensure(result.ContrastStart >= 4.5 && result.ContrastEnd >= 4.5, "Active title contrast is below WCAG AA.");
+    Ensure(result.BevelHighlight >= 1.5 && result.BevelShadow >= 1.5, "Caption-button bevel contrast is too flat.");
+}
 
 static string CreateDiagnosticDocument(string menu)
 {
@@ -558,3 +608,8 @@ sealed record FoldResult(double InnerWidth, double ReferenceTextLeft, HeadingGeo
     double InitialBodyHeight, double CollapsedBodyHeight, double RestoredBodyHeight,
     double InitialFollowingTop, double CollapsedFollowingTop, double RestoredFollowingTop,
     double CollapseAllBodyHeight, double ExpandAllBodyHeight, string FindStatus, double MatchWidth, double MatchHeight);
+sealed record TitleState(string Background, string ActiveStart, string ActiveEnd, string TextColor);
+sealed record TitleButton(Rectangle Rect, string Command, string Label, string App, string Webkit);
+sealed record TitleResult(double InnerWidth, double ClientWidth, Rectangle Bar, Rectangle Text, string TextOverflow, Rectangle Menu, Rectangle First,
+    TitleButton[] Buttons, string App, string Webkit, TitleState Before, TitleState After, double ContrastStart, double ContrastEnd,
+    double BevelHighlight, double BevelShadow);

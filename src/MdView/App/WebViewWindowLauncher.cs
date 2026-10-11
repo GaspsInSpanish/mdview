@@ -196,7 +196,7 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
             if (launch.Ticket.IsResolved) return;
 
             var scale = WebViewNative.GetDpiForSystem() / 96.0;
-            window = CreateWindow("mdview", WebViewNative.WsOverlappedWindow,
+            window = CreateWindow("mdview", WebViewNative.WsOverlappedWindow | WebViewNative.WsClipChildren,
                 (int)Math.Round(1000 * scale), (int)Math.Round(760 * scale));
             var uri = new Uri(launch.Url);
             state = new WindowState(uri.GetLeftPart(UriPartial.Authority), documentId, launch);
@@ -223,12 +223,14 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
             state.WebView.Settings.AreDevToolsEnabled = false;
             state.WebView.Settings.IsStatusBarEnabled = false;
             state.WebView.Settings.IsZoomControlEnabled = true;
+            state.WebView.Settings.IsNonClientRegionSupportEnabled = true;
             ResizeController(window, state);
             state.WebView.DocumentTitleChanged += (_, _) => UpdateTitle(window, state);
             state.WebView.NavigationStarting += (_, eventArgs) => HandleNavigation(state, eventArgs);
             state.WebView.NewWindowRequested += (_, eventArgs) => HandleNewWindow(state, eventArgs);
             state.WebView.ProcessFailed += (_, eventArgs) => HandleProcessFailed(window, state, eventArgs);
-            state.WebView.NavigationCompleted += (_, eventArgs) => HandleNavigationCompleted(state, eventArgs);
+            state.WebView.NavigationCompleted += (_, eventArgs) => HandleNavigationCompleted(window, state, eventArgs);
+            state.WebView.WebMessageReceived += (_, eventArgs) => HandleWebMessage(window, state, eventArgs);
             state.WebView.AddWebResourceRequestedFilter($"{DocumentHost.Origin}/*", CoreWebView2WebResourceContext.All);
             state.WebView.WebResourceRequested += (_, eventArgs) => HandleWebResourceRequestedAsync(eventArgs);
             state.WebView.Navigate(launch.Url);
@@ -295,13 +297,34 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
         500 => "Internal Server Error", 503 => "Service Unavailable", _ => "Response"
     };
 
-    private void HandleNavigationCompleted(WindowState state, CoreWebView2NavigationCompletedEventArgs eventArgs)
+    private void HandleNavigationCompleted(nint window, WindowState state, CoreWebView2NavigationCompletedEventArgs eventArgs)
     {
+        if (eventArgs.IsSuccess) PushWindowState(window, state, force: true);
         if (eventArgs.IsSuccess && !state.Connected)
         {
             state.Connected = true;
             Notify(ClientConnected);
             state.Launch.Ticket.Resolve(LaunchOutcome.Connected);
+        }
+    }
+
+    private void HandleWebMessage(nint window, WindowState state, CoreWebView2WebMessageReceivedEventArgs eventArgs)
+    {
+        var message = WindowFrameProtocol.Parse(eventArgs.Source, eventArgs.WebMessageAsJson, DocumentHost.Origin);
+        if (message.Kind == FrameMessageKind.WindowCommand)
+        {
+            switch (message.Command)
+            {
+                case "minimize": WebViewNative.ShowWindow(window, WebViewNative.SwMinimize); break;
+                case "maximize": WebViewNative.ShowWindow(window, WebViewNative.IsZoomed(window) ? WebViewNative.SwRestore : WebViewNative.SwMaximize); break;
+                case "restore": WebViewNative.ShowWindow(window, WebViewNative.SwRestore); break;
+                case "close": WebViewNative.PostMessageW(window, WebViewNative.WmClose, 0, 0); break;
+            }
+        }
+        else if (message.Kind == FrameMessageKind.FrameColors)
+        {
+            state.FrameColors = message.Colors!;
+            InvalidateFrameBand(window);
         }
     }
 
@@ -408,16 +431,34 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
                 return 0;
             }
 
+            // WM_NCCALCSIZE is sent inside CreateWindowExW, before the WindowState can be registered.
+            // Handle both forms: the first one, during creation, has wParam FALSE, and leaving it to
+            // DefWindowProc gives the new window a standard caption until its first resize.
+            if (message == WebViewNative.WmNcCalcSize)
+            {
+                if (wParam != 0) ApplyMaximizedBounds(window, lParam);
+                return 0;
+            }
+
             if (!windows.TryGetValue(window, out var state))
                 return WebViewNative.DefWindowProcW(window, message, wParam, lParam);
 
             switch (message)
             {
+                case WebViewNative.WmNcHitTest:
+                    return HitTestFrame(window, lParam);
+                case WebViewNative.WmEraseBackground:
+                    return 1;
+                case WebViewNative.WmPaint:
+                    PaintFrame(window, state);
+                    return 0;
                 case WebViewNative.WmSetFocus:
                     state.Controller?.MoveFocus(CoreWebView2MoveFocusReason.Programmatic);
                     return 0;
-                case WebViewNative.WmActivate when (ushort)(wParam & 0xffff) != WebViewNative.WaInactive:
-                    state.Controller?.MoveFocus(CoreWebView2MoveFocusReason.Programmatic);
+                case WebViewNative.WmActivate:
+                    state.Active = (ushort)(wParam & 0xffff) != WebViewNative.WaInactive;
+                    if (state.Active) state.Controller?.MoveFocus(CoreWebView2MoveFocusReason.Programmatic);
+                    PushWindowState(window, state);
                     return 0;
                 case WebViewNative.WmMove:
                     state.Controller?.NotifyParentWindowPositionChanged();
@@ -426,6 +467,8 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
                     if (state.Controller is not null)
                         state.Controller.IsVisible = wParam != WebViewNative.SizeMinimized;
                     ResizeController(window, state);
+                    InvalidateFrameBand(window);
+                    PushWindowState(window, state);
                     return 0;
                 case WebViewNative.WmDpiChanged:
                     ApplyDpiChange(window, lParam);
@@ -444,6 +487,111 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
         {
             SafeReport($"The mdview window encountered an error: {exception.Message}");
             return 0;
+        }
+    }
+
+    private static void ApplyMaximizedBounds(nint window, nint proposedRectangle)
+    {
+        if (!WebViewNative.IsZoomed(window)) return;
+        var proposed = Marshal.PtrToStructure<WebViewNative.Rect>(proposedRectangle);
+        var monitor = WebViewNative.MonitorFromRect(ref proposed, WebViewNative.MonitorDefaultToNearest);
+        var info = new WebViewNative.MonitorInfo { Size = (uint)Marshal.SizeOf<WebViewNative.MonitorInfo>() };
+        if (monitor != 0 && WebViewNative.GetMonitorInfoW(monitor, ref info))
+        {
+            var adjusted = AutoHideTaskbarInsets.Apply(
+                new(info.Work.Left, info.Work.Top, info.Work.Right, info.Work.Bottom),
+                HasAutoHideTaskbar(info.Monitor, WebViewNative.AbeLeft),
+                HasAutoHideTaskbar(info.Monitor, WebViewNative.AbeTop),
+                HasAutoHideTaskbar(info.Monitor, WebViewNative.AbeRight),
+                HasAutoHideTaskbar(info.Monitor, WebViewNative.AbeBottom));
+            Marshal.StructureToPtr(new WebViewNative.Rect(adjusted.Left, adjusted.Top, adjusted.Right, adjusted.Bottom),
+                proposedRectangle, false);
+        }
+    }
+
+    private static bool HasAutoHideTaskbar(WebViewNative.Rect monitor, uint edge)
+    {
+        var data = new WebViewNative.AppBarData
+        {
+            Size = (uint)Marshal.SizeOf<WebViewNative.AppBarData>(),
+            Edge = edge,
+            Rectangle = monitor
+        };
+        return WebViewNative.SHAppBarMessage(WebViewNative.AbmGetAutoHideBarEx, ref data) != 0;
+    }
+
+    private static nint HitTestFrame(nint window, nint lParam)
+    {
+        // Windows 11 snap layouts require HTMAXBUTTON from WM_NCHITTEST. A page-drawn button is in
+        // the WebView2 child and cannot supply that parent non-client result; Windows 10 snapping is retained.
+        if (!WebViewNative.GetWindowRect(window, out var rect)) return WindowFrameHitTest.Client;
+        var x = unchecked((short)((long)lParam & 0xffff)) - rect.Left;
+        var y = unchecked((short)(((long)lParam >> 16) & 0xffff)) - rect.Top;
+        return WindowFrameHitTest.Test(x, y, rect.Right - rect.Left, rect.Bottom - rect.Top,
+            (int)WebViewNative.GetDpiForWindow(window), WebViewNative.IsZoomed(window));
+    }
+
+    private static void PaintFrame(nint window, WindowState state)
+    {
+        var dc = WebViewNative.BeginPaint(window, out var paint);
+        try
+        {
+            if (dc == 0 || !WebViewNative.GetClientRect(window, out var client)) return;
+            var colors = state.FrameColors;
+            // WS_CLIPCHILDREN keeps this off the WebView2 child, so fill the whole client: until the child
+            // exists, and at the growing edge during a live resize, the window shows the frame face rather
+            // than black or stale pixels. Invalidation stays limited to the band.
+            Fill(dc, new(0, 0, client.Right, client.Bottom), colors.Face);
+            if (WebViewNative.IsZoomed(window)) return;
+            DrawEdges(dc, client.Right, client.Bottom, 0, colors.HiInner, colors.LoOuter);
+            DrawEdges(dc, client.Right, client.Bottom, 1, colors.HiOuter, colors.LoInner);
+        }
+        finally { if (dc != 0) WebViewNative.EndPaint(window, ref paint); }
+    }
+
+    private static void DrawEdges(nint dc, int width, int height, int inset, string topLeft, string bottomRight)
+    {
+        Fill(dc, new(inset, inset, width - inset, inset + 1), topLeft);
+        Fill(dc, new(inset, inset, inset + 1, height - inset), topLeft);
+        Fill(dc, new(inset, height - inset - 1, width - inset, height - inset), bottomRight);
+        Fill(dc, new(width - inset - 1, inset, width - inset, height - inset), bottomRight);
+    }
+
+    private static void Fill(nint dc, WebViewNative.Rect rect, string color)
+    {
+        var rgb = uint.Parse(color.AsSpan(1), System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture);
+        var brush = WebViewNative.CreateSolidBrush((rgb & 0xff) << 16 | (rgb & 0xff00) | (rgb >> 16));
+        try { if (brush != 0) WebViewNative.FillRect(dc, ref rect, brush); }
+        finally { if (brush != 0) WebViewNative.DeleteObject(brush); }
+    }
+
+    private void PushWindowState(nint window, WindowState state, bool force = false)
+    {
+        if (state.WebView is null) return;
+        var maximized = WebViewNative.IsZoomed(window);
+        if (!force && state.LastPostedMaximized == maximized && state.LastPostedActive == state.Active) return;
+        state.WebView.PostWebMessageAsJson(System.Text.Json.JsonSerializer.Serialize(new
+            { type = "window-state", maximized, active = state.Active }));
+        state.LastPostedMaximized = maximized;
+        state.LastPostedActive = state.Active;
+    }
+
+    private static void InvalidateFrameBand(nint window)
+    {
+        if (WebViewNative.IsZoomed(window) || !WebViewNative.GetClientRect(window, out var client)) return;
+        var band = ResizeBand(window);
+        var rectangles = new[]
+        {
+            new WebViewNative.Rect(0, 0, client.Right, Math.Min(band, client.Bottom)),
+            new WebViewNative.Rect(0, band, Math.Min(band, client.Right), Math.Max(band, client.Bottom - band)),
+            new WebViewNative.Rect(Math.Max(0, client.Right - band), band, client.Right, Math.Max(band, client.Bottom - band)),
+            new WebViewNative.Rect(0, Math.Max(0, client.Bottom - band), client.Right, client.Bottom)
+        };
+        foreach (var rectangle in rectangles)
+        {
+            var value = rectangle;
+            WebViewNative.InvalidateRect(window, ref value, false);
         }
     }
 
@@ -585,11 +733,14 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
         Length = (uint)Marshal.SizeOf<WebViewNative.WindowPlacement>()
     };
 
+    private static int ResizeBand(nint window) => Math.Max(4, (int)Math.Ceiling(4 * WebViewNative.GetDpiForWindow(window) / 96.0));
+
     private static void ResizeController(nint window, WindowState state)
     {
         if (state.Controller is null || !WebViewNative.GetClientRect(window, out var rect)) return;
-        state.Controller.Bounds = new System.Drawing.Rectangle(0, 0,
-            Math.Max(0, rect.Right - rect.Left), Math.Max(0, rect.Bottom - rect.Top));
+        var band = WebViewNative.IsZoomed(window) ? 0 : ResizeBand(window);
+        state.Controller.Bounds = new System.Drawing.Rectangle(band, band,
+            Math.Max(0, rect.Right - rect.Left - 2 * band), Math.Max(0, rect.Bottom - rect.Top - 2 * band));
     }
 
     private async void BeginClose(nint window, WindowState state, bool forExit)
@@ -740,6 +891,10 @@ public sealed class WebViewWindowLauncher : IBrowserLauncher, ILifecycleSignals,
         internal bool Destroyed { get; set; }
         internal bool ProcessFailureReported { get; set; }
         internal bool Connected { get; set; }
+        internal bool Active { get; set; } = true;
+        internal FrameColors FrameColors { get; set; } = new("#C9C5B9", "#FFFFFF", "#E7E3D9", "#A8A499", "#88847A");
+        internal bool? LastPostedMaximized { get; set; }
+        internal bool? LastPostedActive { get; set; }
     }
 
     private sealed class LaunchRequest

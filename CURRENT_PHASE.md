@@ -1,8 +1,10 @@
 # Current phase
 
-No active implementation packet. W3 (W3a + W3b) completed 2026-10-11, committed, not released.
-Next is **W4** in `projectoutline.md` §5b: the Win98 window frame (in-page title bar with drag region
-and caption buttons, the resize band painted as the Win98 border).
+No active implementation packet. W4 (Win98 frame) completed 2026-10-11, committed, not released
+(W3 and W4 both unreleased; the owner chose to go straight from W3 to W4). Next is **W5** in
+`projectoutline.md` §5b: the installer checks for and bootstraps the WebView2 runtime, and the
+dormant browser-launch code (`BrowserLauncher`, `BrowserDiscovery`, `browserPath`/`bravePath`) is
+deleted.
 
 Windows acceptance: `tools/WindowsBlackBox/run.sh` (app black-box) and `run-probes.sh` (every
 ServeProbe suite natively on Windows). The owner must close their mdview first.

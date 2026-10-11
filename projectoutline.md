@@ -389,6 +389,15 @@ which caught a test expectation Linux could not. Accepted residuals: mixed-DPI m
 restored window; a local `.md` symlinked to a network path still reaches the network (needs prior
 local write access).
 
+**W4 accepted 2026-10-11, not yet released.** No Windows caption (`WM_NCCALCSIZE`, both forms);
+a 4 px DPI-scaled band uncovered by WebView2, hit-tested in the parent and painted as a Win98
+raised bevel from page-supplied tokens (`WS_CLIPCHILDREN`); maximized windows confined to the
+proposed monitor's work area with a 1 px inset on auto-hide taskbar edges; in-page title bar
+(`titlebar.js`, `app-region: drag`, caption buttons → validated `window` messages, close through
+the dirty prompt). Light active gradient end darkened `#1084D0` → `#0F79BF` for AA. Owner approved
+the look by hand; the page scrollbar running beside the title bar was raised and accepted. Windows
+11 snap layouts are unreachable without a native maximize button (owner is on Windows 10).
+
 Each packet ships as its own release, so a regression is always one step back.
 Everything in the "No" column gets a precise click-list for the owner, per
 `docs/MANUAL_REVIEW.md`.

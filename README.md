@@ -41,6 +41,14 @@ document again.
   so the change survives a reload and shows up in git. If the file changed underneath you,
   the click is refused and the page reloads instead of overwriting the other change.
 
+## The window
+
+mdview draws its own Windows 98-style window: a navy title bar with the file name (grey when
+another window is active), beveled minimize / maximize / close buttons, and a thin 3D border you
+can grab to resize. Drag the title bar to move, double-click it to maximize, drag it to a screen
+edge to snap. Right-click the title bar or press **Alt+Space** for the window menu; **Alt+F4**
+closes. Closing with unsaved edits asks first, whichever way you close.
+
 ## Windows and files
 
 - **Your window is remembered.** mdview reopens at the size and position you last closed it at, and

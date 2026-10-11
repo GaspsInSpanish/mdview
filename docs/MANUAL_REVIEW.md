@@ -201,3 +201,14 @@ Placement round-trips and maximize are checked automatically (`tools/WindowsBlac
    not shifted by the taskbar's height. (The review could not confirm this without a real run.)
 3. With two monitors, close a window on the second one and reopen it: it reopens there. Unplug or
    disable that monitor and reopen: it opens on a visible screen instead.
+
+## 10. The Win98 frame (v1.7) — what only hands can check
+
+Caption removal, the 8 resize edges, the caption buttons and maximize fit are checked automatically
+on Windows (`tools/WindowsBlackBox`). The title bar's drag region is not:
+
+1. Drag the title bar to move; double-click to maximize and again to restore; drag a maximized
+   window down by its title bar to restore it; drag to a screen edge to snap.
+2. Right-click the title bar for the window menu; **Alt+Space** and **Alt+F4** with the page focused.
+3. Resize live from an edge: no grey flashes over the page.
+4. With **auto-hide taskbar** on, maximize: the hidden taskbar still slides up at the screen edge.

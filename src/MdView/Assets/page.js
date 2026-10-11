@@ -7,8 +7,7 @@
     });
   };
 
-  if (window.mdviewToggle.id) {
-    window.chrome?.webview?.addEventListener('message', event => {
+  window.chrome?.webview?.addEventListener('message', event => {
       if (event.data?.type === 'reload') {
         // Unsaved edits outrank a reload; edit mode flags the file as changed on disk instead.
         if (!window.mdviewEdit?.onExternalChange?.()) location.reload();
@@ -16,7 +15,6 @@
         window.mdviewApplyTheme(event.data.theme);
       }
     });
-  }
 
   document.addEventListener('change', async event => {
     const checkbox = event.target;

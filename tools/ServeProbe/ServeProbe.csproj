@@ -15,6 +15,7 @@
     <Compile Include="../../src/MdView/App/BrowserDiscovery.cs" Link="App/BrowserDiscovery.cs" />
     <Compile Include="../../src/MdView/App/InstanceCoordinator.cs" Link="App/InstanceCoordinator.cs" />
     <Compile Include="../../src/MdView/App/HandOffPipe.cs" Link="App/HandOffPipe.cs" />
+    <Compile Include="../../src/MdView/App/WindowFrameProtocol.cs" Link="App/WindowFrameProtocol.cs" />
     <Compile Include="../../src/MdView/App/Lifecycle.cs" Link="App/Lifecycle.cs" />
     <EmbeddedResource Include="../../src/MdView/Assets/**/*" Link="Assets/%(RecursiveDir)%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../src/MdView/Rendering/Theme.css" Link="Rendering/Theme.css" />

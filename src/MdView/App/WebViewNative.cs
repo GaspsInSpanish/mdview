@@ -5,6 +5,10 @@ namespace MdView.App;
 internal static class WebViewNative
 {
     internal const uint WmDestroy = 0x0002;
+    internal const uint WmPaint = 0x000F;
+    internal const uint WmEraseBackground = 0x0014;
+    internal const uint WmNcCalcSize = 0x0083;
+    internal const uint WmNcHitTest = 0x0084;
     internal const uint WmMove = 0x0003;
     internal const uint WmSize = 0x0005;
     internal const uint WmActivate = 0x0006;
@@ -13,8 +17,12 @@ internal static class WebViewNative
     internal const uint WmDpiChanged = 0x02E0;
     internal const uint WmApp = 0x8000;
     internal const uint WsOverlappedWindow = 0x00CF0000;
+    internal const uint WsClipChildren = 0x02000000;
     internal const int CwUseDefault = unchecked((int)0x80000000);
     internal const int SwShow = 5;
+    internal const int SwMinimize = 6;
+    internal const int SwRestore = 9;
+    internal const int SwMaximize = 3;
     internal const uint SwShownormal = 1;
     internal const uint SwShowMaximized = 3;
     internal const uint WindowPlacementRestoreToMaximized = 0x0002;
@@ -30,6 +38,8 @@ internal static class WebViewNative
     internal const uint MbYesNo = 0x00000004;
     internal const uint MbIconWarning = 0x00000030;
     internal const int IdYes = 6;
+    internal const uint AbmGetAutoHideBarEx = 0x0000000B;
+    internal const uint AbeLeft = 0, AbeTop = 1, AbeRight = 2, AbeBottom = 3;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     internal struct WindowClass
@@ -70,6 +80,10 @@ internal static class WebViewNative
     [StructLayout(LayoutKind.Sequential)]
     internal struct Rect
     {
+        internal Rect(int left, int top, int right, int bottom)
+        {
+            Left = left; Top = top; Right = right; Bottom = bottom;
+        }
         internal int Left;
         internal int Top;
         internal int Right;
@@ -94,6 +108,28 @@ internal static class WebViewNative
         internal Rect Monitor;
         internal Rect Work;
         internal uint Flags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct PaintStruct
+    {
+        internal nint DeviceContext;
+        [MarshalAs(UnmanagedType.Bool)] internal bool Erase;
+        internal Rect Paint;
+        [MarshalAs(UnmanagedType.Bool)] internal bool Restore;
+        [MarshalAs(UnmanagedType.Bool)] internal bool IncUpdate;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)] internal byte[] Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct AppBarData
+    {
+        internal uint Size;
+        internal nint Window;
+        internal uint CallbackMessage;
+        internal uint Edge;
+        internal Rect Rectangle;
+        internal nint Parameter;
     }
 
     internal delegate nint WindowProcedure(nint window, uint message, nuint wParam, nint lParam);
@@ -143,6 +179,39 @@ internal static class WebViewNative
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetClientRect(nint window, out Rect rect);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetWindowRect(nint window, out Rect rect);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsZoomed(nint window);
+
+    [DllImport("user32.dll")]
+    internal static extern nint BeginPaint(nint window, out PaintStruct paint);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EndPaint(nint window, ref PaintStruct paint);
+
+    [DllImport("user32.dll")]
+    internal static extern int FillRect(nint deviceContext, ref Rect rectangle, nint brush);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool InvalidateRect(nint window, nint rectangle, bool erase);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool InvalidateRect(nint window, ref Rect rectangle, bool erase);
+
+    [DllImport("gdi32.dll")]
+    internal static extern nint CreateSolidBrush(uint color);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool DeleteObject(nint value);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetWindowPlacement(nint window, ref WindowPlacement placement);
@@ -156,6 +225,9 @@ internal static class WebViewNative
 
     [DllImport("user32.dll")]
     internal static extern nint MonitorFromWindow(nint window, uint flags);
+
+    [DllImport("shell32.dll")]
+    internal static extern nuint SHAppBarMessage(uint message, ref AppBarData data);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
