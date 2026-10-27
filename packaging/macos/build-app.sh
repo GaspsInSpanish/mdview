@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 <osx-arm64|osx-x64> <version> <outdir>" >&2
+if [[ $# -lt 3 || $# -gt 4 || ${4:-} != "" && ${4:-} != "--smoke" ]]; then
+  echo "usage: $0 <osx-arm64|osx-x64> <version> <outdir> [--smoke]" >&2
   exit 2
 fi
 
 rid=$1
 version=${2#v}
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be numeric major.minor.patch" >&2; exit 2; }
 outdir=$(mkdir -p "$3" && cd "$3" && pwd)
+smoke=${4:-}
 case "$rid" in
   osx-arm64) architecture=arm64 ;;
   osx-x64) architecture=x64 ;;
@@ -16,13 +18,20 @@ case "$rid" in
 esac
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
-publish="$repo/src/MdView.Mac/bin/Release/net8.0/$rid/publish"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 app="$work/mdview.app"
 stage="$work/dmg"
+publish="$work/publish"
 
-dotnet publish "$repo/src/MdView.Mac/MdView.Mac.csproj" -c Release -r "$rid" -p:Version="$version"
+publish_args=(dotnet publish "$repo/src/MdView.Mac/MdView.Mac.csproj" -c Release -r "$rid" -p:Version="$version" -o "$publish")
+if [[ "$smoke" == "--smoke" ]]; then publish_args+=(-p:MdViewSmoke=true); fi
+"${publish_args[@]}"
+unexpected=$(find "$publish" -mindepth 1 -maxdepth 1 ! -name mdview ! -name mdview.pdb -print)
+[[ -z "$unexpected" ]] || { echo "unexpected publish output:" >&2; echo "$unexpected" >&2; exit 1; }
+actual_arch=$(lipo -archs "$publish/mdview")
+expected_arch=$([[ "$rid" == osx-arm64 ]] && echo arm64 || echo x86_64)
+[[ "$actual_arch" == "$expected_arch" ]] || { echo "expected $expected_arch binary, got $actual_arch" >&2; exit 1; }
 mkdir -p "$app/Contents/MacOS" "$stage"
 sed "s/@VERSION@/$version/g" "$repo/packaging/macos/Info.plist" > "$app/Contents/Info.plist"
 cp "$publish/mdview" "$app/Contents/MacOS/mdview"

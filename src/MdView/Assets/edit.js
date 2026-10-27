@@ -148,7 +148,7 @@
     textarea.addEventListener('keydown', event => {
       const control = document.documentElement.dataset.platform === 'mac'
         ? event.metaKey && !event.ctrlKey && !event.altKey
-        : event.ctrlKey && !event.altKey && !event.metaKey;
+        : event.ctrlKey;
       if (event.key === 'Escape' || (event.key === 'Enter' && control)) {
         event.preventDefault();
         enqueue(commit);

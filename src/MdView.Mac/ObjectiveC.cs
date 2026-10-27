@@ -27,7 +27,11 @@ internal static unsafe class ObjectiveC
     [DllImport(ObjC, EntryPoint = "class_addMethod")] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool class_addMethod3(nint cls, nint selector, delegate* unmanaged<nint, nint, nint, nint, nint, void> implementation, string types);
     [DllImport(ObjC, EntryPoint = "class_addMethod")] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool class_addMethod4(nint cls, nint selector, delegate* unmanaged<nint, nint, nint, nint, nint, nint, void> implementation, string types);
+    [DllImport(ObjC, EntryPoint = "class_addMethod")] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool class_addMethodBool(nint cls, nint selector, delegate* unmanaged<nint, nint, nint, byte> implementation, string types);
+    [DllImport(ObjC, EntryPoint = "class_addMethod")] [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool class_addMethodLong(nint cls, nint selector, delegate* unmanaged<nint, nint, nint, nint> implementation, string types);
     [DllImport(ObjC, EntryPoint = "class_addMethod")] [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool class_addMethodPtr(nint cls, nint selector, delegate* unmanaged<nint, nint, nint, nint, nint, nint, nint> implementation, string types);
     [DllImport(ObjC)] [return: MarshalAs(UnmanagedType.I1)] internal static extern bool class_addProtocol(nint cls, nint protocol);
@@ -44,6 +48,7 @@ internal static unsafe class ObjectiveC
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern nint SendDouble(nint receiver, nint selector, double arg);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern nint SendRect(nint receiver, nint selector, CGRect rect);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern nint SendRect(nint receiver, nint selector, CGRect rect, nint arg);
+    [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern CGPoint SendPoint(nint receiver, nint selector, CGPoint point);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern nint SendScript(nint receiver, nint selector, nint source, nint injectionTime, byte mainFrameOnly);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern nint SendRectNUInt(nint receiver, nint selector, CGRect rect, nuint style, nuint backing, byte defer);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern void SendVoid(nint receiver, nint selector);
@@ -52,11 +57,31 @@ internal static unsafe class ObjectiveC
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern void SendVoid(nint receiver, nint selector, nint a, nint b, nint c);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern void SendVoid(nint receiver, nint selector, byte arg);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern byte SendBool(nint receiver, nint selector);
+    [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern byte SendBool(nint receiver, nint selector, nint arg);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern long SendLong(nint receiver, nint selector);
     [DllImport(ObjC, EntryPoint = "objc_msgSend")] internal static extern nint SendRead(nint receiver, nint selector, nint buffer, nuint maximum);
 
-    internal static nint Class(string name) => objc_getClass(name);
-    internal static nint Sel(string name) => sel_registerName(name);
+    internal static nint Class(string name)
+    {
+        var value = objc_getClass(name);
+        return value != 0 ? value : throw new InvalidOperationException($"Objective-C class '{name}' is unavailable.");
+    }
+    internal static nint Sel(string name)
+    {
+        var value = sel_registerName(name);
+        return value != 0 ? value : throw new InvalidOperationException($"Objective-C selector '{name}' is unavailable.");
+    }
+    internal static void AddProtocolIfAvailable(nint cls, string name)
+    {
+        var protocol = objc_getProtocol(name);
+        if (protocol == 0)
+        {
+            MacApplication.Report($"Objective-C protocol '{name}' is unavailable; registration was skipped.");
+            return;
+        }
+        if (!class_addProtocol(cls, protocol))
+            MacApplication.Report($"Objective-C protocol '{name}' could not be added; delegate selectors remain registered.");
+    }
     internal static nint New(string className) => Send(Send(Class(className), Sel("alloc")), Sel("init"));
     internal static nint String(string value)
     {

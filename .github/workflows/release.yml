@@ -23,8 +23,10 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Derive version
         shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}' }
+          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $env:INPUT_VERSION } else { $env:GITHUB_REF_NAME }
           $version = $tag -replace '^v', ''
           if ([string]::IsNullOrWhiteSpace($version)) { throw 'A release version is required.' }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -66,17 +68,32 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Derive version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ '${{ github.event_name }}' == workflow_dispatch ]]; then tag='${{ inputs.version }}'; else tag='${{ github.ref_name }}'; fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then tag=$INPUT_VERSION; else tag=$GITHUB_REF_NAME; fi
           version=${tag#v}; [[ -n "$version" ]]; echo "VERSION=$version" >> "$GITHUB_ENV"
       - name: Build Mac disk images
         run: |
           set -euo pipefail
           packaging/macos/build-app.sh osx-arm64 "$VERSION" "$RUNNER_TEMP/release"
           packaging/macos/build-app.sh osx-x64 "$VERSION" "$RUNNER_TEMP/release"
+          packaging/macos/build-app.sh osx-arm64 "$VERSION" "$RUNNER_TEMP/smoke" --smoke
           cd "$RUNNER_TEMP/release"
           for file in *.dmg; do hash=$(shasum -a 256 "$file" | awk '{print $1}'); printf '%s  %s\n' "$hash" "$file" > "$file.sha256"; done
+      - name: Smoke arm64 app and start shipped app
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-app" "$RUNNER_TEMP/smoke-app"
+          hdiutil attach "$RUNNER_TEMP/release/mdview-$VERSION-macos-arm64.dmg" -mountpoint "$RUNNER_TEMP/release-mount" -nobrowse
+          cp -R "$RUNNER_TEMP/release-mount/mdview.app" "$RUNNER_TEMP/release-app/mdview.app"
+          hdiutil detach "$RUNNER_TEMP/release-mount"
+          hdiutil attach "$RUNNER_TEMP/smoke/mdview-$VERSION-macos-arm64.dmg" -mountpoint "$RUNNER_TEMP/smoke-mount" -nobrowse
+          cp -R "$RUNNER_TEMP/smoke-mount/mdview.app" "$RUNNER_TEMP/smoke-app/mdview.app"
+          hdiutil detach "$RUNNER_TEMP/smoke-mount"
+          bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/smoke-app/mdview.app" direct
+          bash tools/MacSmoke/startup.sh "$RUNNER_TEMP/release-app/mdview.app"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-release
@@ -91,8 +108,10 @@ jobs:
           path: release-assets
           merge-multiple: true
       - name: Derive version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [[ '${{ github.event_name }}' == workflow_dispatch ]]; then tag='${{ inputs.version }}'; else tag='${{ github.ref_name }}'; fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then tag=$INPUT_VERSION; else tag=$GITHUB_REF_NAME; fi
           echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
       - name: Create GitHub release
         env:

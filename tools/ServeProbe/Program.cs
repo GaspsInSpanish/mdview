@@ -278,6 +278,16 @@ static async Task CheckNavigationDecisionsAsync()
             Ensure(hostile.Action == NavigationAction.Ignore && touched.Count == 0,
                 $"A file URI with a host reached the filesystem or was opened: {target} (checked: {string.Join(", ", touched)})");
         }
+        if (!OperatingSystem.IsWindows())
+        {
+            foreach (var target in new[] { "file:///net/server/share/a.md", "file:///Network/Servers/server/share/a.md" })
+            {
+                var touched = false;
+                var remote = NavigationDecision.Decide(target, DocumentHost.Origin, _ => { touched = true; return true; });
+                Ensure(remote.Action == NavigationAction.Ignore && !touched,
+                    $"A macOS automount path reached the filesystem: {target}");
+            }
+        }
         // Repeated separators after a drive letter are a local path on Windows (C:\\\x is C:\x), not a UNC
         // smuggle; what matters is that the filesystem only ever sees the normalised local form.
         if (OperatingSystem.IsWindows())

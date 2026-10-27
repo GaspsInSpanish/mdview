@@ -12,6 +12,9 @@
     <AssemblyName>mdview</AssemblyName>
     <RootNamespace>MdView</RootNamespace>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(MdViewSmoke)' == 'true'">
+    <DefineConstants>$(DefineConstants);MDVIEW_SMOKE</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <Compile Include="../MdView/Rendering/**/*.cs" Link="Rendering/%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="../MdView/Serving/**/*.cs" Link="Serving/%(RecursiveDir)%(Filename)%(Extension)" />

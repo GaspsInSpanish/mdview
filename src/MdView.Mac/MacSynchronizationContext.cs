@@ -29,10 +29,19 @@ internal sealed unsafe class MacSynchronizationContext : SynchronizationContext
     [UnmanagedCallersOnly]
     private static void Invoke(nint context)
     {
-        if (!Callbacks.TryRemove(context, out var callback)) return;
-        var pool = ObjectiveC.objc_autoreleasePoolPush();
-        try { callback(null); } catch (Exception exception) { MacApplication.Report(exception.Message); }
-        finally { ObjectiveC.objc_autoreleasePoolPop(pool); }
+        nint pool = 0;
+        try
+        {
+            if (!Callbacks.TryRemove(context, out var callback)) return;
+            pool = ObjectiveC.objc_autoreleasePoolPush();
+            callback(null);
+        }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
+        finally
+        {
+            if (pool != 0) try { ObjectiveC.objc_autoreleasePoolPop(pool); }
+            catch (Exception exception) { MacApplication.Report(exception.Message); }
+        }
     }
 }
 

@@ -9,7 +9,6 @@ namespace MdView.Mac;
 internal static unsafe class MacApplication
 {
     private const string Origin = "mdview://app";
-    private static readonly nint ApplicationClass = RegisterDelegate();
     private static readonly ConcurrentDictionary<nint, byte> Delegates = new();
     private static nint application;
     private static DocumentHost? host;
@@ -17,10 +16,30 @@ internal static unsafe class MacApplication
     private static MacWindowLauncher? launcher;
     private static nint appDelegate;
     private static bool receivedOpen;
+    private static bool registered;
+    private static SynchronizationContext? mainContext;
+
+    internal static void EnsureRegistered()
+    {
+        if (registered || !OperatingSystem.IsMacOS()) return;
+        RegisterDelegate();
+        registered = true;
+    }
+
+    internal static void InitializeApplication()
+    {
+        if (application != 0) return;
+        application = ObjectiveC.Send(ObjectiveC.Class("NSApplication"), ObjectiveC.Sel("sharedApplication"));
+        if (application == 0) throw new InvalidOperationException("NSApplication sharedApplication returned nil.");
+        mainContext = SynchronizationContext.Current;
+    }
 
     internal static int Run(InstanceCoordinator coordinator, string? initialPath)
     {
-        application = ObjectiveC.Send(ObjectiveC.Class("NSApplication"), ObjectiveC.Sel("sharedApplication"));
+        InitializeApplication();
+        var setupPool = ObjectiveC.objc_autoreleasePoolPush();
+        try
+        {
         ObjectiveC.SendULong(application, ObjectiveC.Sel("setActivationPolicy:"), 0);
         appDelegate = ObjectiveC.New("MdViewApplicationDelegate");
         Delegates.TryAdd(appDelegate, 0);
@@ -39,10 +58,11 @@ internal static unsafe class MacApplication
             receivedOpen = true;
             if (!lifecycle.TryLaunch(host.RegisterDocument(initialPath))) return 1;
         }
-        var mainContext = SynchronizationContext.Current;
         _ = lifecycle.Completion.ContinueWith(_ =>
             mainContext?.Post(_ => ObjectiveC.SendVoid(application, ObjectiveC.Sel("terminate:"), application), null),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        }
+        finally { ObjectiveC.objc_autoreleasePoolPop(setupPool); }
         ObjectiveC.SendVoid(application, ObjectiveC.Sel("activateIgnoringOtherApps:"), (byte)1);
         ObjectiveC.SendVoid(application, ObjectiveC.Sel("run"));
         lifecycle.Dispose();
@@ -50,12 +70,27 @@ internal static unsafe class MacApplication
     }
 
     internal static void Report(string message) => Console.Error.WriteLine(message);
-    internal static void ShowError(string message) => ShowAlert(message, 2);
+    internal static void ShowError(string message)
+    {
+        if (OperatingSystem.IsMacOS() && application == 0)
+        {
+            try { InitializeApplication(); }
+            catch { Console.Error.WriteLine(message); return; }
+        }
+        ShowAlert(message, 2);
+    }
     internal static void ShowWarning(string message) => ShowAlert(message, 0);
 
     private static void ShowAlert(string message, long style)
     {
         if (!OperatingSystem.IsMacOS()) { Console.Error.WriteLine(message); return; }
+        if (pthread_main_np() == 0)
+        {
+            var context = mainContext;
+            if (context is null) { Console.Error.WriteLine(message); return; }
+            context.Post(_ => ShowAlert(message, style), null);
+            return;
+        }
         var pool = ObjectiveC.objc_autoreleasePoolPush();
         try
         {
@@ -69,38 +104,51 @@ internal static unsafe class MacApplication
         finally { ObjectiveC.objc_autoreleasePoolPop(pool); }
     }
 
-    private static nint RegisterDelegate()
+    private static void RegisterDelegate()
     {
-        if (!OperatingSystem.IsMacOS()) return 0;
         var cls = ObjectiveC.objc_allocateClassPair(ObjectiveC.Class("NSObject"), "MdViewApplicationDelegate", 0);
-        ObjectiveC.class_addProtocol(cls, ObjectiveC.objc_getProtocol("NSApplicationDelegate"));
+        if (cls == 0) throw new InvalidOperationException("Could not allocate the application delegate class.");
+        ObjectiveC.AddProtocolIfAvailable(cls, "NSApplicationDelegate");
         ObjectiveC.class_addMethod1(cls, ObjectiveC.Sel("applicationDidFinishLaunching:"), &DidFinish, "v@:@");
         ObjectiveC.class_addMethod2(cls, ObjectiveC.Sel("application:openURLs:"), &OpenUrls, "v@:@@");
-        ObjectiveC.class_addMethodBool(cls, ObjectiveC.Sel("applicationShouldTerminateAfterLastWindowClosed:"), &ShouldTerminate, "B@:@");
+        ObjectiveC.class_addMethodBool(cls, ObjectiveC.Sel("applicationShouldTerminateAfterLastWindowClosed:"), &ShouldTerminateAfterLastWindow, "B@:@");
+        ObjectiveC.class_addMethodLong(cls, ObjectiveC.Sel("applicationShouldTerminate:"), &ShouldTerminate, "q@:@");
         ObjectiveC.class_addMethod1(cls, ObjectiveC.Sel("mdviewQuit:"), &Quit, "v@:@");
         ObjectiveC.objc_registerClassPair(cls);
-        return cls;
     }
+
+    [DllImport("/usr/lib/libSystem.B.dylib")]
+    private static extern int pthread_main_np();
 
     [UnmanagedCallersOnly]
     private static void DidFinish(nint self, nint command, nint notification)
     {
-        var context = SynchronizationContext.Current;
-        _ = Task.Delay(TimeSpan.FromSeconds(1)).ContinueWith(_ => context?.Post(_ =>
+        try
         {
-            if (receivedOpen || lifecycle?.IsShuttingDown == true) return;
-            var path = MacFileDialogProvider.OpenPath();
-            if (path is null) lifecycle?.Shutdown();
-            else OpenPath(path);
-        }, null), TaskScheduler.Default);
+            var context = SynchronizationContext.Current;
+            _ = Task.Delay(TimeSpan.FromSeconds(1)).ContinueWith(_ => context?.Post(_ =>
+            {
+                if (receivedOpen || lifecycle?.IsShuttingDown == true) return;
+                launcher?.NotifyModalStarted();
+                try
+                {
+                    var path = MacFileDialogProvider.OpenPath();
+                    if (path is null) lifecycle?.Shutdown();
+                    else OpenPath(path);
+                }
+                finally { launcher?.NotifyModalCompleted(); }
+            }, null), TaskScheduler.Default);
+        }
+        catch (Exception exception) { ShowWarning(exception.Message); }
     }
 
     [UnmanagedCallersOnly]
     private static void OpenUrls(nint self, nint command, nint app, nint urls)
     {
-        var pool = ObjectiveC.objc_autoreleasePoolPush();
+        nint pool = 0;
         try
         {
+            pool = ObjectiveC.objc_autoreleasePoolPush();
             receivedOpen = true;
             var count = ObjectiveC.SendLong(urls, ObjectiveC.Sel("count"));
             for (long index = 0; index < count; index++)
@@ -111,7 +159,11 @@ internal static unsafe class MacApplication
             }
         }
         catch (Exception exception) { ShowWarning(exception.Message); }
-        finally { ObjectiveC.objc_autoreleasePoolPop(pool); }
+        finally
+        {
+            if (pool != 0) try { ObjectiveC.objc_autoreleasePoolPop(pool); }
+            catch (Exception exception) { Report(exception.Message); }
+        }
     }
 
     private static void OpenPath(string candidate)
@@ -122,11 +174,26 @@ internal static unsafe class MacApplication
     }
 
     [UnmanagedCallersOnly]
-    private static byte ShouldTerminate(nint self, nint command, nint sender) => 1;
+    private static byte ShouldTerminateAfterLastWindow(nint self, nint command, nint sender) => 0;
 
     [UnmanagedCallersOnly]
-    private static void Quit(nint self, nint command, nint sender) =>
-        launcher?.RequestExit(() => lifecycle?.Shutdown());
+    private static nint ShouldTerminate(nint self, nint command, nint sender)
+    {
+        try
+        {
+            if (lifecycle?.Completion.IsCompleted == true) return 1;
+            launcher?.RequestExit(() => lifecycle?.Shutdown());
+        }
+        catch (Exception exception) { ShowWarning(exception.Message); }
+        return 0;
+    }
+
+    [UnmanagedCallersOnly]
+    private static void Quit(nint self, nint command, nint sender)
+    {
+        try { launcher?.RequestExit(() => lifecycle?.Shutdown()); }
+        catch (Exception exception) { ShowWarning(exception.Message); }
+    }
 
     private static void BuildMenu()
     {
@@ -189,6 +256,7 @@ internal sealed class MacFileDialogProvider : IFileDialogProvider
         ObjectiveC.SendVoid(types, ObjectiveC.Sel("addObject:"), ObjectiveC.String("md"));
         ObjectiveC.SendVoid(types, ObjectiveC.Sel("addObject:"), ObjectiveC.String("markdown"));
         ObjectiveC.SendVoid(panel, ObjectiveC.Sel("setAllowedFileTypes:"), types);
+        ObjectiveC.SendVoid(types, ObjectiveC.Sel("release"));
         if (!string.IsNullOrEmpty(initialDirectory))
         {
             var url = ObjectiveC.Send(ObjectiveC.Class("NSURL"), ObjectiveC.Sel("fileURLWithPath:"), ObjectiveC.String(initialDirectory));

@@ -29,6 +29,11 @@ public readonly record struct NavigationDecision(NavigationAction Action, string
             // Allowlist on top of the blocklist above: only an ordinary local path is accepted, so a
             // LocalPath form nobody anticipated fails closed instead of reaching File.Exists.
             if (!IsOrdinaryLocalPath(path)) return new(NavigationAction.Ignore);
+            // macOS automounts remote shares below /net and /Network. Refuse them before File.Exists,
+            // just as Windows refuses UNC paths before a filesystem call can offer user credentials.
+            if (!OperatingSystem.IsWindows() &&
+                (path.StartsWith("/net/", StringComparison.Ordinal) || path.StartsWith("/Network/", StringComparison.Ordinal)))
+                return new(NavigationAction.Ignore);
             // Check and open the normalised path, never the raw decoded string (C:\\\x collapses to C:\x).
             path = OperatingSystem.IsWindows() ? Path.GetFullPath(path) : path;
             return DocumentKinds.TryGetKind(path, out _) && fileExists(path)

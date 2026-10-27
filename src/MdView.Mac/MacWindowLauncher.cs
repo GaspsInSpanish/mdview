@@ -23,16 +23,24 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         })();
         """;
     private static readonly ConcurrentDictionary<nint, MacWindowLauncher> Objects = new();
-    private static readonly nint DelegateClass = RegisterDelegate();
+    private static bool registered;
     private readonly DocumentHost host;
     private readonly InProcessRequestAdapter adapter;
     private readonly Action<string>? report;
     private readonly SynchronizationContext uiContext;
     private readonly Dictionary<nint, WindowState> windows = [];
     private readonly Dictionary<string, WindowState> documents = new(StringComparer.Ordinal);
-    private readonly HashSet<nint> stoppedTasks = [];
+    private static readonly ConcurrentDictionary<nint, byte> StoppedTasks = new();
     private bool exiting;
     private Action? exitCompletion;
+    private CGPoint cascadePoint = new(40, 700);
+
+    internal static void EnsureRegistered()
+    {
+        if (registered || !OperatingSystem.IsMacOS()) return;
+        RegisterDelegate();
+        registered = true;
+    }
 
     internal MacWindowLauncher(DocumentHost host, Action<string>? report)
     {
@@ -54,6 +62,8 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     public event Action? ModalCommandStarted;
     public event Action? ModalCommandCompleted;
     public event Action? ExitRequested;
+    internal void NotifyModalStarted() => ModalCommandStarted?.Invoke();
+    internal void NotifyModalCompleted() => ModalCommandCompleted?.Invoke();
 
     public bool TryLaunch(string url, out string? error)
     {
@@ -74,7 +84,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     }
 
     public void QueueLaunch(string url, LaunchTicket ticket, Action<string?> completed) =>
-        uiContext.Post(_ => completed(TryLaunch(url, ticket, out var error) ? null : error), null);
+        uiContext.Post(state => { _ = TryLaunch(url, ticket, out _); completed(null); }, null);
 
     public void RequestExit(Action shutdown)
     {
@@ -121,6 +131,8 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         ObjectiveC.SendVoid(window, ObjectiveC.Sel("setContentView:"), webView);
         ObjectiveC.SendVoid(window, ObjectiveC.Sel("setDelegate:"), handler);
         ObjectiveC.SendVoid(window, ObjectiveC.Sel("setTitle:"), ObjectiveC.String(TitleFor(id)));
+        if (windows.Count == 0) ObjectiveC.SendVoid(window, ObjectiveC.Sel("center"));
+        else cascadePoint = ObjectiveC.SendPoint(window, ObjectiveC.Sel("cascadeTopLeftFromPoint:"), cascadePoint);
         var state = new WindowState(window, webView, handler, id, ticket);
         windows[window] = state;
         documents[id] = state;
@@ -128,6 +140,10 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         var requestUrl = ObjectiveC.Send(ObjectiveC.Class("NSURL"), ObjectiveC.Sel("URLWithString:"), ObjectiveC.String(url));
         var request = ObjectiveC.Send(ObjectiveC.Class("NSURLRequest"), ObjectiveC.Sel("requestWithURL:"), requestUrl);
         ObjectiveC.Send(webView, ObjectiveC.Sel("loadRequest:"), request);
+        ObjectiveC.SendVoid(script, ObjectiveC.Sel("release"));
+        ObjectiveC.SendVoid(controller, ObjectiveC.Sel("release"));
+        ObjectiveC.SendVoid(configuration, ObjectiveC.Sel("release"));
+        ObjectiveC.SendVoid(handler, ObjectiveC.Sel("release"));
         var context = SynchronizationContext.Current;
         _ = Task.Delay(TimeSpan.FromSeconds(30), ticket.WhenAbandoned).ContinueWith(_ => context?.Post(_ =>
         {
@@ -144,37 +160,76 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     private async void StartSchemeTask(nint task)
     {
         HostResponse? response = null;
+        var delivered = false;
+        nint fields = 0;
+        nint nativeResponse = 0;
         try
         {
             var request = ObjectiveC.Send(task, ObjectiveC.Sel("request"));
             var urlObject = ObjectiveC.Send(request, ObjectiveC.Sel("URL"));
             var urlText = ObjectiveC.GetString(ObjectiveC.Send(urlObject, ObjectiveC.Sel("absoluteString")));
             var method = ObjectiveC.GetString(ObjectiveC.Send(request, ObjectiveC.Sel("HTTPMethod"))) ?? "GET";
-            if (urlText is null || !Uri.TryCreate(urlText, UriKind.Absolute, out var uri)) return;
+            if (urlText is null || !Uri.TryCreate(urlText, UriKind.Absolute, out var uri))
+                throw new InvalidOperationException("WebKit supplied an invalid request URL.");
             var headers = ObjectiveC.Send(request, ObjectiveC.Sel("allHTTPHeaderFields"));
             var origin = headers == 0 ? null : ObjectiveC.GetString(ObjectiveC.Send(headers, ObjectiveC.Sel("objectForKey:"), ObjectiveC.String("Origin")));
             var data = ObjectiveC.Send(request, ObjectiveC.Sel("HTTPBody"));
             var body = data != 0 ? Bytes(data) : ReadStreamCapped(ObjectiveC.Send(request, ObjectiveC.Sel("HTTPBodyStream")),
                 DocumentHost.MaximumBodyBytes(uri.AbsolutePath));
-            response = await adapter.HandleAsync(method, uri, origin, body);
-            if (stoppedTasks.Contains(task)) return;
-            var fields = ObjectiveC.New("NSMutableDictionary");
+            response = uri.Scheme == "mdview" && uri.Host == "app"
+                ? await adapter.HandleAsync(method, uri, origin, body)
+                : new HostResponse(404, "text/plain; charset=utf-8", "Not Found"u8.ToArray(), new Dictionary<string, string>());
+            if (IsStopped(task)) return;
+            fields = ObjectiveC.New("NSMutableDictionary");
             ObjectiveC.SendVoid(fields, ObjectiveC.Sel("setObject:forKey:"), ObjectiveC.String(response.ContentType), ObjectiveC.String("Content-Type"));
             foreach (var pair in response.Headers)
                 ObjectiveC.SendVoid(fields, ObjectiveC.Sel("setObject:forKey:"), ObjectiveC.String(pair.Value), ObjectiveC.String(pair.Key));
-            var nativeResponse = ObjectiveC.Send(ObjectiveC.Send(ObjectiveC.Class("NSHTTPURLResponse"), ObjectiveC.Sel("alloc")),
+            nativeResponse = ObjectiveC.Send(ObjectiveC.Send(ObjectiveC.Class("NSHTTPURLResponse"), ObjectiveC.Sel("alloc")),
                 ObjectiveC.Sel("initWithURL:statusCode:HTTPVersion:headerFields:"), urlObject, (nint)response.StatusCode,
                 ObjectiveC.String("HTTP/1.1"), fields);
-            ObjectiveC.SendVoid(task, ObjectiveC.Sel("didReceiveResponse:"), nativeResponse);
-            if (response.Body.Length > 0) ObjectiveC.SendVoid(task, ObjectiveC.Sel("didReceiveData:"), Data(response.Body));
-            ObjectiveC.SendVoid(task, ObjectiveC.Sel("didFinish"));
+            if (!IsStopped(task)) ObjectiveC.SendVoid(task, ObjectiveC.Sel("didReceiveResponse:"), nativeResponse);
+            if (response.Body.Length > 0 && !IsStopped(task)) ObjectiveC.SendVoid(task, ObjectiveC.Sel("didReceiveData:"), Data(response.Body));
+            if (!IsStopped(task))
+            {
+                ObjectiveC.SendVoid(task, ObjectiveC.Sel("didFinish"));
+                delivered = true;
+            }
         }
-        catch (Exception exception) { report?.Invoke($"A page request failed: {exception.Message}"); }
+        catch (Exception exception)
+        {
+            report?.Invoke($"A page request failed: {exception.Message}");
+            FailSchemeTask(task, exception.Message);
+        }
         finally
         {
-            stoppedTasks.Remove(task);
-            if (response is not null) host.CompleteResponse(response);
+            try { StoppedTasks.TryRemove(task, out _); }
+            catch (Exception exception) { MacApplication.Report(exception.Message); }
+            try { if (response is not null && delivered) host.CompleteResponse(response); }
+            catch (Exception exception) { MacApplication.Report(exception.Message); }
+            try { if (nativeResponse != 0) ObjectiveC.SendVoid(nativeResponse, ObjectiveC.Sel("release")); }
+            catch (Exception exception) { MacApplication.Report(exception.Message); }
+            try { if (fields != 0) ObjectiveC.SendVoid(fields, ObjectiveC.Sel("release")); }
+            catch (Exception exception) { MacApplication.Report(exception.Message); }
+            try { ObjectiveC.SendVoid(task, ObjectiveC.Sel("release")); }
+            catch (Exception exception) { MacApplication.Report(exception.Message); }
         }
+    }
+
+    private static bool IsStopped(nint task) => StoppedTasks.ContainsKey(task);
+
+    private static void FailSchemeTask(nint task, string message)
+    {
+        if (IsStopped(task)) return;
+        try
+        {
+            var info = ObjectiveC.New("NSMutableDictionary");
+            ObjectiveC.SendVoid(info, ObjectiveC.Sel("setObject:forKey:"), ObjectiveC.String(message), ObjectiveC.String("NSLocalizedDescription"));
+            var error = ObjectiveC.Send(ObjectiveC.Class("NSError"), ObjectiveC.Sel("errorWithDomain:code:userInfo:"),
+                ObjectiveC.String("io.github.gaspsinspanish.mdview"), (nint)1, info);
+            if (!IsStopped(task)) ObjectiveC.SendVoid(task, ObjectiveC.Sel("didFailWithError:"), error);
+            ObjectiveC.SendVoid(info, ObjectiveC.Sel("release"));
+        }
+        catch (Exception exception) { MacApplication.Report($"Could not fail a WebKit scheme task: {exception.Message}"); }
     }
 
     private void Message(nint handler, nint message)
@@ -187,7 +242,9 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         if (!string.Equals(scheme, "mdview", StringComparison.Ordinal) ||
             !string.Equals(hostName, "app", StringComparison.Ordinal)) return;
         var body = ObjectiveC.Send(message, ObjectiveC.Sel("body"));
+        if (body == 0 || ObjectiveC.SendBool(ObjectiveC.Class("NSJSONSerialization"), ObjectiveC.Sel("isValidJSONObject:"), body) == 0) return;
         var jsonData = ObjectiveC.Send(ObjectiveC.Class("NSJSONSerialization"), ObjectiveC.Sel("dataWithJSONObject:options:error:"), body, 0, 0);
+        if (jsonData == 0) return;
         var json = Encoding.UTF8.GetString(Bytes(jsonData));
         var state = windows.Values.FirstOrDefault(value => value.Handler == handler);
         if (state is null) return;
@@ -200,6 +257,66 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         else if (parsed.Command == "close") RequestClose(state);
     }
 
+    private static bool IsOwnMainFrame(nint frame)
+    {
+        if (frame == 0 || ObjectiveC.SendBool(frame, ObjectiveC.Sel("isMainFrame")) == 0) return false;
+        var securityOrigin = ObjectiveC.Send(frame, ObjectiveC.Sel("securityOrigin"));
+        if (securityOrigin == 0) return false;
+        return string.Equals(ObjectiveC.GetString(ObjectiveC.Send(securityOrigin, ObjectiveC.Sel("protocol"))), "mdview", StringComparison.Ordinal) &&
+            string.Equals(ObjectiveC.GetString(ObjectiveC.Send(securityOrigin, ObjectiveC.Sel("host"))), "app", StringComparison.Ordinal);
+    }
+
+    private static void ShowJavaScriptAlert(nint message, nint frame, nint completion)
+    {
+        try
+        {
+            if (IsOwnMainFrame(frame))
+            {
+                var alert = ObjectiveC.New("NSAlert");
+                ObjectiveC.SendVoid(alert, ObjectiveC.Sel("setMessageText:"), ObjectiveC.String("mdview"));
+                ObjectiveC.SendVoid(alert, ObjectiveC.Sel("setInformativeText:"), message);
+                ObjectiveC.SendLong(alert, ObjectiveC.Sel("runModal"));
+                ObjectiveC.SendVoid(alert, ObjectiveC.Sel("release"));
+            }
+        }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
+        finally { InvokeVoidBlock(completion); }
+    }
+
+    private static void ShowJavaScriptConfirm(nint message, nint frame, nint completion)
+    {
+        byte accepted = 0;
+        try
+        {
+            if (IsOwnMainFrame(frame))
+            {
+                var alert = ObjectiveC.New("NSAlert");
+                ObjectiveC.SendVoid(alert, ObjectiveC.Sel("setMessageText:"), ObjectiveC.String("mdview"));
+                ObjectiveC.SendVoid(alert, ObjectiveC.Sel("setInformativeText:"), message);
+                ObjectiveC.SendVoid(alert, ObjectiveC.Sel("addButtonWithTitle:"), ObjectiveC.String("OK"));
+                ObjectiveC.SendVoid(alert, ObjectiveC.Sel("addButtonWithTitle:"), ObjectiveC.String("Cancel"));
+                accepted = ObjectiveC.SendLong(alert, ObjectiveC.Sel("runModal")) == 1000 ? (byte)1 : (byte)0;
+                ObjectiveC.SendVoid(alert, ObjectiveC.Sel("release"));
+            }
+        }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
+        finally { InvokeBoolBlock(completion, accepted); }
+    }
+
+    private static unsafe void InvokeVoidBlock(nint block)
+    {
+        if (block == 0) return;
+        var invoke = Marshal.ReadIntPtr(block, 16);
+        ((delegate* unmanaged<nint, void>)invoke)(block);
+    }
+
+    private static unsafe void InvokeBoolBlock(nint block, byte value)
+    {
+        if (block == 0) return;
+        var invoke = Marshal.ReadIntPtr(block, 16);
+        ((delegate* unmanaged<nint, byte, void>)invoke)(block, value);
+    }
+
     private bool TryHandleControlMessage(WindowState state, string json)
     {
         try
@@ -209,17 +326,21 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
             if (!root.TryGetProperty("type", out var type)) return false;
             if (type.GetString() == "close-result")
             {
+                if (!state.ClosePending) return true;
                 var dirty = root.TryGetProperty("dirty", out var value) && value.ValueKind == JsonValueKind.True;
                 FinishClose(state, dirty);
                 return true;
             }
+#if MDVIEW_SMOKE
             if (type.GetString() == "smoke-report" && Environment.GetEnvironmentVariable("MDVIEW_SMOKE_REPORT") is { Length: > 0 } path)
             {
-                File.WriteAllText(path, root.GetRawText());
+                try { File.WriteAllText(path, root.GetRawText()); }
+                catch (Exception exception) { report?.Invoke($"The smoke report could not be written: {exception.Message}"); }
                 state.AllowClose = true;
                 ObjectiveC.SendVoid(state.Window, ObjectiveC.Sel("performClose:"), state.Window);
                 return true;
             }
+#endif
         }
         catch (JsonException) { }
         return false;
@@ -229,11 +350,23 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     {
         if (state.ClosePending) return;
         state.ClosePending = true;
+        state.CloseTimeout?.Cancel();
+        state.CloseTimeout?.Dispose();
+        state.CloseTimeout = new CancellationTokenSource();
+        var token = state.CloseTimeout.Token;
+        _ = Task.Delay(TimeSpan.FromSeconds(2), token).ContinueWith(_ => uiContext.Post(_ =>
+        {
+            if (state.ClosePending) FinishClose(state, dirty: true);
+        }, null), CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
         Evaluate(state, "window.chrome.webview.postMessage({type:'close-result',dirty:Boolean(window.mdviewEdit&&window.mdviewEdit.dirty)})");
     }
 
     private void FinishClose(WindowState state, bool dirty)
     {
+        if (!state.ClosePending) return;
+        state.CloseTimeout?.Cancel();
+        state.CloseTimeout?.Dispose();
+        state.CloseTimeout = null;
         if (dirty)
         {
             var alert = ObjectiveC.New("NSAlert");
@@ -241,11 +374,11 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
             ObjectiveC.SendVoid(alert, ObjectiveC.Sel("setInformativeText:"), ObjectiveC.String("Your unsaved changes will be lost."));
             ObjectiveC.SendVoid(alert, ObjectiveC.Sel("addButtonWithTitle:"), ObjectiveC.String("Discard"));
             ObjectiveC.SendVoid(alert, ObjectiveC.Sel("addButtonWithTitle:"), ObjectiveC.String("Cancel"));
-            if (ObjectiveC.SendLong(alert, ObjectiveC.Sel("runModal")) != 1000)
+            var discard = ObjectiveC.SendLong(alert, ObjectiveC.Sel("runModal")) == 1000;
+            ObjectiveC.SendVoid(alert, ObjectiveC.Sel("release"));
+            if (!discard)
             {
-                state.ClosePending = false;
-                exiting = false;
-                exitCompletion = null;
+                CancelExit();
                 return;
             }
         }
@@ -253,13 +386,37 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         ObjectiveC.SendVoid(state.Window, ObjectiveC.Sel("performClose:"), state.Window);
     }
 
+    private void CancelExit()
+    {
+        exiting = false;
+        exitCompletion = null;
+        foreach (var open in windows.Values)
+        {
+            open.ClosePending = false;
+            open.CloseTimeout?.Cancel();
+            open.CloseTimeout?.Dispose();
+            open.CloseTimeout = null;
+        }
+    }
+
     private void Closed(nint window)
     {
         if (!windows.Remove(window, out var state)) return;
         documents.Remove(state.DocumentId);
+        state.CloseTimeout?.Cancel();
+        state.CloseTimeout?.Dispose();
+        ObjectiveC.SendVoid(state.WebView, ObjectiveC.Sel("stopLoading"));
+        ObjectiveC.SendVoid(state.WebView, ObjectiveC.Sel("setNavigationDelegate:"), 0);
+        ObjectiveC.SendVoid(state.WebView, ObjectiveC.Sel("setUIDelegate:"), 0);
+        ObjectiveC.SendVoid(state.Window, ObjectiveC.Sel("setDelegate:"), 0);
+        var configuration = ObjectiveC.Send(state.WebView, ObjectiveC.Sel("configuration"));
+        var controller = ObjectiveC.Send(configuration, ObjectiveC.Sel("userContentController"));
+        if (controller != 0) ObjectiveC.SendVoid(controller, ObjectiveC.Sel("removeScriptMessageHandlerForName:"), ObjectiveC.String("mdview"));
         Objects.TryRemove(state.Handler, out _);
         if (state.Connected) ClientDisconnected?.Invoke(); else state.Ticket.Resolve(LaunchOutcome.Abandoned);
         if (exiting && windows.Count == 0) exitCompletion?.Invoke();
+        ObjectiveC.SendVoid(state.WebView, ObjectiveC.Sel("release"));
+        ObjectiveC.SendVoid(state.Window, ObjectiveC.Sel("release"));
     }
 
     private void Connected(nint webView)
@@ -277,6 +434,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
 
     private void StartSmokeIfRequested(WindowState state)
     {
+#if MDVIEW_SMOKE
         if (Environment.GetEnvironmentVariable("MDVIEW_SMOKE_REPORT") is not { Length: > 0 }) return;
         const string script = """
             (async()=>{const first=!sessionStorage.getItem('mdview-smoke');if(first){sessionStorage.setItem('mdview-smoke','1');
@@ -288,6 +446,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
             highlighted:code,toggle:true,reloaded:document.body.textContent.includes('SMOKE_RELOAD_MARKER')});})()
             """;
         Evaluate(state, script);
+#endif
     }
 
     private static void Evaluate(WindowState state, string javascript) =>
@@ -305,19 +464,40 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         foreach (var state in windows.Values) Evaluate(state, $"window.__mdviewDispatch({json})");
     }
 
-    private void Decide(nint action, nint block)
+    private nint Decide(nint webView, nint action)
     {
         var request = ObjectiveC.Send(action, ObjectiveC.Sel("request"));
         var text = ObjectiveC.GetString(ObjectiveC.Send(ObjectiveC.Send(request, ObjectiveC.Sel("URL")), ObjectiveC.Sel("absoluteString"))) ?? string.Empty;
         var decision = NavigationDecision.Decide(text, Origin);
+        if (decision.Action == NavigationAction.Allow)
+        {
+            TrackAllowedNavigation(webView, text);
+            return 1;
+        }
         if (decision.Action == NavigationAction.OpenDocument && decision.Target is not null)
-            host.OpenFromHandOff(decision.Target);
+        {
+            try { host.OpenFromHandOff(decision.Target); }
+            catch (Exception exception) when (exception is ObjectDisposedException or IOException or UnauthorizedAccessException)
+            { report?.Invoke($"The Markdown file could not be opened: {exception.Message}"); }
+        }
         else if (decision.Action == NavigationAction.OpenExternal && decision.Target is not null)
         {
             var url = ObjectiveC.Send(ObjectiveC.Class("NSURL"), ObjectiveC.Sel("URLWithString:"), ObjectiveC.String(decision.Target));
             ObjectiveC.Send(ObjectiveC.Send(ObjectiveC.Class("NSWorkspace"), ObjectiveC.Sel("sharedWorkspace")), ObjectiveC.Sel("openURL:"), url);
         }
-        InvokeDecision(block, decision.Action == NavigationAction.Allow ? 1 : 0);
+        return 0;
+    }
+
+    private void TrackAllowedNavigation(nint webView, string target)
+    {
+        var state = windows.Values.FirstOrDefault(value => value.WebView == webView);
+        if (state is null || !Uri.TryCreate(target, UriKind.Absolute, out var uri) || uri.Segments.Length != 3 || uri.Segments[1] != "d/") return;
+        var id = Uri.UnescapeDataString(uri.Segments[2].TrimEnd('/'));
+        if (id == state.DocumentId) return;
+        documents.Remove(state.DocumentId);
+        state.DocumentId = id;
+        documents[id] = state;
+        ObjectiveC.SendVoid(state.Window, ObjectiveC.Sel("setTitle:"), ObjectiveC.String(TitleFor(id)));
     }
 
     private static unsafe void InvokeDecision(nint block, nint policy)
@@ -367,15 +547,12 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
             return ObjectiveC.Send(ObjectiveC.Class("NSData"), ObjectiveC.Sel("dataWithBytes:length:"), (nint)pointer, bytes.Length);
     }
 
-    private static unsafe nint RegisterDelegate()
+    private static unsafe void RegisterDelegate()
     {
-        if (!OperatingSystem.IsMacOS()) return 0;
         var cls = ObjectiveC.objc_allocateClassPair(ObjectiveC.Class("NSObject"), "MdViewWebDelegate", 0);
-        ObjectiveC.class_addProtocol(cls, ObjectiveC.objc_getProtocol("WKURLSchemeHandler"));
-        ObjectiveC.class_addProtocol(cls, ObjectiveC.objc_getProtocol("WKNavigationDelegate"));
-        ObjectiveC.class_addProtocol(cls, ObjectiveC.objc_getProtocol("WKUIDelegate"));
-        ObjectiveC.class_addProtocol(cls, ObjectiveC.objc_getProtocol("WKScriptMessageHandler"));
-        ObjectiveC.class_addProtocol(cls, ObjectiveC.objc_getProtocol("NSWindowDelegate"));
+        if (cls == 0) throw new InvalidOperationException("Could not allocate the WebKit delegate class.");
+        foreach (var protocol in new[] { "WKURLSchemeHandler", "WKNavigationDelegate", "WKUIDelegate", "WKScriptMessageHandler", "NSWindowDelegate" })
+            ObjectiveC.AddProtocolIfAvailable(cls, protocol);
         ObjectiveC.class_addMethod2(cls, ObjectiveC.Sel("webView:startURLSchemeTask:"), &StartTask, "v@:@@");
         ObjectiveC.class_addMethod2(cls, ObjectiveC.Sel("webView:stopURLSchemeTask:"), &StopTask, "v@:@@");
         ObjectiveC.class_addMethod2(cls, ObjectiveC.Sel("userContentController:didReceiveScriptMessage:"), &ReceiveMessage, "v@:@@");
@@ -383,44 +560,109 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         ObjectiveC.class_addMethod3(cls, ObjectiveC.Sel("webView:didFailProvisionalNavigation:withError:"), &DidFailNavigation, "v@:@@@");
         ObjectiveC.class_addMethod3(cls, ObjectiveC.Sel("webView:decidePolicyForNavigationAction:decisionHandler:"), &DecidePolicy, "v@:@@@");
         ObjectiveC.class_addMethodPtr(cls, ObjectiveC.Sel("webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:"), &CreateWebView, "@@:@@@@");
+        ObjectiveC.class_addMethod4(cls, ObjectiveC.Sel("webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:"), &JavaScriptAlert, "v@:@@@@");
+        ObjectiveC.class_addMethod4(cls, ObjectiveC.Sel("webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:"), &JavaScriptConfirm, "v@:@@@@");
         ObjectiveC.class_addMethod1(cls, ObjectiveC.Sel("webViewWebContentProcessDidTerminate:"), &ProcessTerminated, "v@:@");
         ObjectiveC.class_addMethodBool(cls, ObjectiveC.Sel("windowShouldClose:"), &WindowShouldClose, "B@:@");
         ObjectiveC.class_addMethod1(cls, ObjectiveC.Sel("windowWillClose:"), &WindowWillClose, "v@:@");
         ObjectiveC.objc_registerClassPair(cls);
-        return cls;
     }
 
     private static MacWindowLauncher? Owner(nint self) => Objects.TryGetValue(self, out var owner) ? owner : null;
 
-    [UnmanagedCallersOnly] private static void StartTask(nint self, nint cmd, nint webView, nint task) => Owner(self)?.StartSchemeTask(task);
-    [UnmanagedCallersOnly] private static void StopTask(nint self, nint cmd, nint webView, nint task) { if (Owner(self) is { } owner) owner.stoppedTasks.Add(task); }
-    [UnmanagedCallersOnly] private static void ReceiveMessage(nint self, nint cmd, nint controller, nint message) => Owner(self)?.Message(self, message);
-    [UnmanagedCallersOnly] private static void DidFinishNavigation(nint self, nint cmd, nint webView, nint navigation) => Owner(self)?.Connected(webView);
+    [UnmanagedCallersOnly] private static void StartTask(nint self, nint cmd, nint webView, nint task)
+    {
+        var retained = false;
+        try
+        {
+            ObjectiveC.Send(task, ObjectiveC.Sel("retain"));
+            retained = true;
+            if (Owner(self) is { } owner) owner.StartSchemeTask(task);
+            else { FailSchemeTask(task, "The mdview request handler is unavailable."); ObjectiveC.SendVoid(task, ObjectiveC.Sel("release")); }
+        }
+        catch (Exception exception)
+        {
+            MacApplication.Report(exception.Message);
+            if (retained) FailSchemeTask(task, exception.Message);
+            if (retained) { try { ObjectiveC.SendVoid(task, ObjectiveC.Sel("release")); } catch { } }
+        }
+    }
+    [UnmanagedCallersOnly] private static void StopTask(nint self, nint cmd, nint webView, nint task)
+    {
+        try { StoppedTasks.TryAdd(task, 0); }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
+    }
+    [UnmanagedCallersOnly] private static void ReceiveMessage(nint self, nint cmd, nint controller, nint message)
+    { try { Owner(self)?.Message(self, message); } catch (Exception exception) { MacApplication.Report(exception.Message); } }
+    [UnmanagedCallersOnly] private static void DidFinishNavigation(nint self, nint cmd, nint webView, nint navigation)
+    { try { Owner(self)?.Connected(webView); } catch (Exception exception) { MacApplication.Report(exception.Message); } }
     [UnmanagedCallersOnly] private static void DidFailNavigation(nint self, nint cmd, nint webView, nint navigation, nint error)
     {
-        var owner = Owner(self); var state = owner?.windows.Values.FirstOrDefault(value => value.WebView == webView);
-        if (owner is null || state is null || state.Connected) return;
-        state.Ticket.Resolve(LaunchOutcome.Abandoned); state.AllowClose = true;
-        owner.report?.Invoke("The mdview page could not be loaded.");
-        ObjectiveC.SendVoid(state.Window, ObjectiveC.Sel("performClose:"), state.Window);
+        try
+        {
+            var owner = Owner(self); var state = owner?.windows.Values.FirstOrDefault(value => value.WebView == webView);
+            if (owner is null || state is null || state.Connected) return;
+            state.Ticket.Resolve(LaunchOutcome.Abandoned); state.AllowClose = true;
+            owner.report?.Invoke("The mdview page could not be loaded.");
+            ObjectiveC.SendVoid(state.Window, ObjectiveC.Sel("performClose:"), state.Window);
+        }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
     }
-    [UnmanagedCallersOnly] private static void DecidePolicy(nint self, nint cmd, nint webView, nint action, nint block) => Owner(self)?.Decide(action, block);
-    [UnmanagedCallersOnly] private static nint CreateWebView(nint self, nint cmd, nint webView, nint config, nint action, nint features) { Owner(self)?.Decide(action, 0); return 0; }
+    [UnmanagedCallersOnly] private static void DecidePolicy(nint self, nint cmd, nint webView, nint action, nint block)
+    {
+        nint policy = 0;
+        try { if (Owner(self) is { } owner) policy = owner.Decide(webView, action); }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
+        finally
+        {
+            try { InvokeDecision(block, policy); }
+            catch (Exception exception) { MacApplication.Report(exception.Message); }
+        }
+    }
+    [UnmanagedCallersOnly] private static nint CreateWebView(nint self, nint cmd, nint webView, nint config, nint action, nint features)
+    {
+        try { if (Owner(self) is { } owner) _ = owner.Decide(webView, action); }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
+        return 0;
+    }
+    [UnmanagedCallersOnly] private static void JavaScriptAlert(nint self, nint cmd, nint webView, nint message, nint frame, nint completion)
+    { try { ShowJavaScriptAlert(message, frame, completion); } catch (Exception exception) { MacApplication.Report(exception.Message); } }
+    [UnmanagedCallersOnly] private static void JavaScriptConfirm(nint self, nint cmd, nint webView, nint message, nint frame, nint completion)
+    { try { ShowJavaScriptConfirm(message, frame, completion); } catch (Exception exception) { MacApplication.Report(exception.Message); } }
     [UnmanagedCallersOnly] private static void ProcessTerminated(nint self, nint cmd, nint webView)
     {
-        var owner = Owner(self); var state = owner?.windows.Values.FirstOrDefault(value => value.WebView == webView);
-        if (owner is null || state is null) return;
-        if (!state.ProcessFailureReported) { state.ProcessFailureReported = true; owner.report?.Invoke("The web content process stopped unexpectedly; reloading."); }
-        ObjectiveC.SendVoid(webView, ObjectiveC.Sel("reload"));
+        try
+        {
+            var owner = Owner(self); var state = owner?.windows.Values.FirstOrDefault(value => value.WebView == webView);
+            if (owner is null || state is null) return;
+            if (!state.ProcessReloadAttempted)
+            {
+                state.ProcessReloadAttempted = true;
+                owner.report?.Invoke("The web content process stopped unexpectedly; reloading once.");
+                ObjectiveC.SendVoid(webView, ObjectiveC.Sel("reload"));
+            }
+            else
+            {
+                owner.report?.Invoke("The web content process stopped again; closing the window.");
+                state.AllowClose = true;
+                ObjectiveC.SendVoid(state.Window, ObjectiveC.Sel("performClose:"), state.Window);
+            }
+        }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
     }
     [UnmanagedCallersOnly] private static byte WindowShouldClose(nint self, nint cmd, nint window)
     {
-        var owner = Owner(self); if (owner is null || !owner.windows.TryGetValue(window, out var state)) return 1;
-        if (state.AllowClose) return 1; owner.RequestClose(state); return 0;
+        try
+        {
+            var owner = Owner(self); if (owner is null || !owner.windows.TryGetValue(window, out var state)) return 1;
+            if (state.AllowClose) return 1; owner.RequestClose(state); return 0;
+        }
+        catch (Exception exception) { MacApplication.Report(exception.Message); return 0; }
     }
     [UnmanagedCallersOnly] private static void WindowWillClose(nint self, nint cmd, nint notification)
     {
-        var window = ObjectiveC.Send(notification, ObjectiveC.Sel("object")); Owner(self)?.Closed(window);
+        try { var window = ObjectiveC.Send(notification, ObjectiveC.Sel("object")); Owner(self)?.Closed(window); }
+        catch (Exception exception) { MacApplication.Report(exception.Message); }
     }
 
     private sealed class WindowState(nint window, nint webView, nint handler, string documentId, LaunchTicket ticket)
@@ -428,11 +670,12 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         internal nint Window { get; } = window;
         internal nint WebView { get; } = webView;
         internal nint Handler { get; } = handler;
-        internal string DocumentId { get; } = documentId;
+        internal string DocumentId { get; set; } = documentId;
         internal LaunchTicket Ticket { get; } = ticket;
         internal bool Connected { get; set; }
         internal bool ClosePending { get; set; }
         internal bool AllowClose { get; set; }
-        internal bool ProcessFailureReported { get; set; }
+        internal bool ProcessReloadAttempted { get; set; }
+        internal CancellationTokenSource? CloseTimeout { get; set; }
     }
 }

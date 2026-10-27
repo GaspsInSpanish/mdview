@@ -25,18 +25,25 @@ jobs:
           done
           dotnet run --project tools/ServeProbe/ServeProbe.csproj -c Release -- --lifecycle README.md
       - name: Build signed app and dmg
-        run: bash packaging/macos/build-app.sh osx-arm64 0.0.0-ci "$RUNNER_TEMP/dist"
-      - name: Extract signed app
+        run: |
+          bash packaging/macos/build-app.sh osx-arm64 0.0.0 "$RUNNER_TEMP/dist"
+          bash packaging/macos/build-app.sh osx-arm64 0.0.0 "$RUNNER_TEMP/dist-smoke" --smoke
+      - name: Extract signed apps
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/dist-app"
-          hdiutil attach "$RUNNER_TEMP/dist/mdview-0.0.0-ci-macos-arm64.dmg" -mountpoint "$RUNNER_TEMP/mount" -nobrowse
+          mkdir -p "$RUNNER_TEMP/dist-app" "$RUNNER_TEMP/smoke-app"
+          hdiutil attach "$RUNNER_TEMP/dist/mdview-0.0.0-macos-arm64.dmg" -mountpoint "$RUNNER_TEMP/mount" -nobrowse
           cp -R "$RUNNER_TEMP/mount/mdview.app" "$RUNNER_TEMP/dist-app/mdview.app"
           hdiutil detach "$RUNNER_TEMP/mount"
+          hdiutil attach "$RUNNER_TEMP/dist-smoke/mdview-0.0.0-macos-arm64.dmg" -mountpoint "$RUNNER_TEMP/mount-smoke" -nobrowse
+          cp -R "$RUNNER_TEMP/mount-smoke/mdview.app" "$RUNNER_TEMP/smoke-app/mdview.app"
+          hdiutil detach "$RUNNER_TEMP/mount-smoke"
       - name: Smoke signed app (command line)
-        run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/dist-app/mdview.app" direct
+        run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/smoke-app/mdview.app" direct
       - name: Smoke signed app (Apple Event openURLs)
-        run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/dist-app/mdview.app" open
+        run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/smoke-app/mdview.app" open
+      - name: Start shipped app
+        run: bash tools/MacSmoke/startup.sh "$RUNNER_TEMP/dist-app/mdview.app"
       - name: Crash reports
         if: failure()
         run: |
@@ -44,6 +51,14 @@ jobs:
             [ -f "$f" ] || continue
             echo "=== $f"; head -c 60000 "$f"; echo
           done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: mdview-crash-reports
+          path: |
+            ~/Library/Logs/DiagnosticReports/*mdview*
+            /Library/Logs/DiagnosticReports/*mdview*
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: mdview-macos-arm64

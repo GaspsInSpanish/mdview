@@ -17,6 +17,9 @@ internal static class Program
         {
             NativeLibraryBootstrap.Load();
             SynchronizationContext.SetSynchronizationContext(new MacSynchronizationContext());
+            MacApplication.EnsureRegistered();
+            MacWindowLauncher.EnsureRegistered();
+            MacApplication.InitializeApplication();
             string? initialPath = null;
             var validationError = string.Empty;
             if (args.Length > 1 || args.Length == 1 && !TryValidatePath(args[0], out initialPath, out validationError))
@@ -70,9 +73,12 @@ internal static class Program
 internal static class NativeLibraryBootstrap
 {
     private static readonly List<nint> Handles = [];
+    private static bool loaded;
     internal static void Load()
     {
+        if (loaded) return;
         Handles.Add(NativeLibrary.Load("/System/Library/Frameworks/AppKit.framework/AppKit"));
         Handles.Add(NativeLibrary.Load("/System/Library/Frameworks/WebKit.framework/WebKit"));
+        loaded = true;
     }
 }
