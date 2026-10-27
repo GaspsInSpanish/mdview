@@ -97,6 +97,21 @@ public sealed class HandOffPipeServer : IDisposable
         if (listener is not null) ClosePipe(listener);
     }
 
+    /// <summary>
+    /// On Unix the pipe is a socket file that outlives a process which exits without disposing the server
+    /// (a crash, a force quit, or AppKit's terminate: calling exit()). FirstPipeInstance then refuses the
+    /// path for good ("Access to the path is denied", measured on macos-14). Only the process holding the
+    /// single-instance mutex creates the server, so a file still at the path belongs to a dead instance.
+    /// The delete only succeeds on the user's own file ($TMPDIR is per-user on macOS; /tmp is sticky), so a
+    /// file another user planted still fails FirstPipeInstance as before.
+    /// </summary>
+    private void DeleteStaleSocket()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        try { File.Delete(Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + pipeName)); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+    }
+
     private async Task<NamedPipeServerStream?> CreateListenerAsync(bool firstInstance,
         CancellationToken cancellationToken)
     {
@@ -108,6 +123,7 @@ public sealed class HandOffPipeServer : IDisposable
             {
                 var options = PipeOptions.CurrentUserOnly | PipeOptions.Asynchronous;
                 if (firstInstance) options |= PipeOptions.FirstPipeInstance;
+                if (firstInstance) DeleteStaleSocket();
                 var listener = pipeFactory(pipeName, options);
                 openPipes.TryAdd(listener, 0);
                 // The outage, if any, is over: a later one may warn again.

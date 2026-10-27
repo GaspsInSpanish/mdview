@@ -479,6 +479,8 @@ static async Task<int> RunHandOffChecksAsync()
         }
         return Task.CompletedTask;
     });
+    if (!OperatingSystem.IsWindows())
+        failed |= !await RunCheckAsync("handoff-stale-socket-replaced", CheckHandOffStaleSocketAsync);
     failed |= !await RunCheckAsync("handoff-valid-and-rejections", CheckHandOffValidationAsync);
     failed |= !await RunCheckAsync("handoff-oversize-unread", CheckHandOffOversizeAsync);
     failed |= !await RunCheckAsync("handoff-truncated-loop-survives", CheckHandOffTruncatedAsync);
@@ -554,6 +556,35 @@ static async Task CheckHandOffPersistentFailureAsync()
     Ensure(reports == 0, "An outage was reported after 2 s, before it could be told apart from a routine blip.");
     await Task.Delay(TimeSpan.FromSeconds(5));
     Ensure(reports == 1, $"A persistent outage produced {reports} warnings, not exactly one.");
+}
+
+static async Task CheckHandOffStaleSocketAsync()
+{
+    // A previous instance that exited without disposing its server leaves the socket file behind.
+    var directory = CreateProbeDirectory("handoff-stale");
+    try
+    {
+        var path = Path.Combine(directory, "valid.md");
+        await File.WriteAllTextAsync(path, "# valid\n");
+        var pipeName = $"mdview-p-{Guid.NewGuid():N}"[..21];
+        var socketPath = Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + pipeName);
+        // .NET unlinks a socket's file when the socket is disposed, so bind elsewhere and move the file
+        // into place: what remains is exactly what a killed process leaves.
+        using (var stale = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.Unix,
+                   System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Unspecified))
+        {
+            stale.Bind(new System.Net.Sockets.UnixDomainSocketEndPoint(socketPath + "-bind"));
+            File.Move(socketPath + "-bind", socketPath);
+        }
+        Ensure(File.Exists(socketPath), "The probe could not leave a stale socket file.");
+        using var host = new DocumentHost(() => DocumentHost.Origin);
+        var opened = new TaskCompletionSource<RegisteredDocument>(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.DocumentOpened += document => opened.TrySetResult(document);
+        using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromMilliseconds(400));
+        Ensure(await HandOffPipeClient.TrySendAsync(path, pipeName), "Hand-off failed with a stale socket file at the pipe path.");
+        Ensure((await opened.Task.WaitAsync(TimeSpan.FromSeconds(1))).Path == path, "DocumentOpened had the wrong path.");
+    }
+    finally { TryDeleteDirectory(directory); }
 }
 
 static async Task CheckHandOffValidationAsync()
