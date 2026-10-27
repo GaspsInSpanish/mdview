@@ -70,6 +70,10 @@ internal static unsafe class MacApplication
     }
 
     internal static void Report(string message) => Console.Error.WriteLine(message);
+
+    /// <summary>Smoke-build tracing to stderr; compiled out of shipped builds.</summary>
+    [System.Diagnostics.Conditional("MDVIEW_SMOKE")]
+    internal static void Trace(string message) => Console.Error.WriteLine($"[trace {DateTime.UtcNow:HH:mm:ss.fff}] {message}");
     internal static void ShowError(string message)
     {
         if (OperatingSystem.IsMacOS() && application == 0)
@@ -84,11 +88,21 @@ internal static unsafe class MacApplication
     private static void ShowAlert(string message, long style)
     {
         if (!OperatingSystem.IsMacOS()) { Console.Error.WriteLine(message); return; }
+#if MDVIEW_SMOKE
+        // A modal alert on a CI runner blocks with nobody to click it; the smoke build prints instead.
+        Console.Error.WriteLine($"[alert] {message}");
+#else
+        ShowModalAlert(message, style);
+#endif
+    }
+
+    private static void ShowModalAlert(string message, long style)
+    {
         if (pthread_main_np() == 0)
         {
             var context = mainContext;
             if (context is null) { Console.Error.WriteLine(message); return; }
-            context.Post(_ => ShowAlert(message, style), null);
+            context.Post(_ => ShowModalAlert(message, style), null);
             return;
         }
         var pool = ObjectiveC.objc_autoreleasePoolPush();

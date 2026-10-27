@@ -179,6 +179,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
             response = uri.Scheme == "mdview" && uri.Host == "app"
                 ? await adapter.HandleAsync(method, uri, origin, body)
                 : new HostResponse(404, "text/plain; charset=utf-8", "Not Found"u8.ToArray(), new Dictionary<string, string>());
+            MacApplication.Trace($"scheme {method} {uri.AbsolutePath} origin={origin ?? "<none>"} body={body.Length} -> {response.StatusCode}");
             if (IsStopped(task)) return;
             fields = ObjectiveC.New("NSMutableDictionary");
             ObjectiveC.SendVoid(fields, ObjectiveC.Sel("setObject:forKey:"), ObjectiveC.String(response.ContentType), ObjectiveC.String("Content-Type"));
@@ -246,6 +247,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         var jsonData = ObjectiveC.Send(ObjectiveC.Class("NSJSONSerialization"), ObjectiveC.Sel("dataWithJSONObject:options:error:"), body, 0, 0);
         if (jsonData == 0) return;
         var json = Encoding.UTF8.GetString(Bytes(jsonData));
+        MacApplication.Trace($"message {json}");
         var state = windows.Values.FirstOrDefault(value => value.Handler == handler);
         if (state is null) return;
         if (TryHandleControlMessage(state, json)) return;
@@ -268,6 +270,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
 
     private static void ShowJavaScriptAlert(nint message, nint frame, nint completion)
     {
+        MacApplication.Trace($"js alert: {ObjectiveC.GetString(message)}");
         try
         {
             if (IsOwnMainFrame(frame))
@@ -285,6 +288,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
 
     private static void ShowJavaScriptConfirm(nint message, nint frame, nint completion)
     {
+        MacApplication.Trace($"js confirm: {ObjectiveC.GetString(message)}");
         byte accepted = 0;
         try
         {
@@ -595,11 +599,12 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     [UnmanagedCallersOnly] private static void ReceiveMessage(nint self, nint cmd, nint controller, nint message)
     { try { Owner(self)?.Message(self, message); } catch (Exception exception) { MacApplication.Report(exception.Message); } }
     [UnmanagedCallersOnly] private static void DidFinishNavigation(nint self, nint cmd, nint webView, nint navigation)
-    { try { Owner(self)?.Connected(webView); } catch (Exception exception) { MacApplication.Report(exception.Message); } }
+    { try { MacApplication.Trace("didFinishNavigation"); Owner(self)?.Connected(webView); } catch (Exception exception) { MacApplication.Report(exception.Message); } }
     [UnmanagedCallersOnly] private static void DidFailNavigation(nint self, nint cmd, nint webView, nint navigation, nint error)
     {
         try
         {
+            MacApplication.Trace($"didFailProvisionalNavigation {ObjectiveC.GetString(ObjectiveC.Send(error, ObjectiveC.Sel("description")))}");
             var owner = Owner(self); var state = owner?.windows.Values.FirstOrDefault(value => value.WebView == webView);
             if (owner is null || state is null || state.Connected) return;
             state.Ticket.Resolve(LaunchOutcome.Abandoned); state.AllowClose = true;
@@ -611,7 +616,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     [UnmanagedCallersOnly] private static void DecidePolicy(nint self, nint cmd, nint webView, nint action, nint block)
     {
         nint policy = 0;
-        try { if (Owner(self) is { } owner) policy = owner.Decide(webView, action); }
+        try { if (Owner(self) is { } owner) policy = owner.Decide(webView, action); MacApplication.Trace($"decidePolicy -> {policy}"); }
         catch (Exception exception) { MacApplication.Report(exception.Message); }
         finally
         {

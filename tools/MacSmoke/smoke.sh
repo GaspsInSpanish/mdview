@@ -8,7 +8,8 @@ fi
 app=$(cd "$1" && pwd)
 mode=${2:-direct}
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+log="$(mktemp)"
+trap 'status=$?; if [[ $status -ne 0 ]]; then echo "--- mdview stderr"; cat "$log"; echo "--- document"; cat "$work/smoke.md" 2>/dev/null; fi; rm -rf "$work"' EXIT
 document="$work/smoke.md"
 report="$work/report.json"
 cat > "$document" <<'MARKDOWN'
@@ -24,10 +25,10 @@ const smoke = true;
 MARKDOWN
 
 if [[ "$mode" == direct ]]; then
-  MDVIEW_SMOKE_REPORT="$report" "$app/Contents/MacOS/mdview" "$document" &
+  MDVIEW_SMOKE_REPORT="$report" "$app/Contents/MacOS/mdview" "$document" 2>"$log" &
   pid=$!
 elif [[ "$mode" == open ]]; then
-  open --env MDVIEW_SMOKE_REPORT="$report" -W -a "$app" "$document" &
+  open --env MDVIEW_SMOKE_REPORT="$report" --stderr "$log" -W -a "$app" "$document" &
   pid=$!
 else
   echo "unknown mode: $mode" >&2
