@@ -33,6 +33,10 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     private static readonly ConcurrentDictionary<nint, byte> StoppedTasks = new();
     private bool exiting;
     private Action? exitCompletion;
+    private readonly HashSet<nint> exitWindows = [];
+
+    /// <summary>The user cancelled an exit at an unsaved-edits prompt.</summary>
+    internal event Action? ExitCancelled;
     private CGPoint cascadePoint = new(40, 700);
 
     internal static void EnsureRegistered()
@@ -92,7 +96,8 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         exiting = true;
         exitCompletion = shutdown;
         if (windows.Count == 0) { shutdown(); return; }
-        foreach (var state in windows.Values.ToArray()) RequestClose(state);
+        exitWindows.Clear();
+        foreach (var state in windows.Values.ToArray()) { exitWindows.Add(state.Window); RequestClose(state); }
     }
 
     private void OpenWindow(string url, LaunchTicket ticket)
@@ -122,6 +127,8 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         var window = ObjectiveC.SendRectNUInt(ObjectiveC.Send(ObjectiveC.Class("NSWindow"), ObjectiveC.Sel("alloc")),
             ObjectiveC.Sel("initWithContentRect:styleMask:backing:defer:"), rect, style, 2, 0);
         if (window == 0) throw new InvalidOperationException("NSWindow creation failed.");
+        // Closed() releases the window itself; AppKit's default release-on-close would make that a double release.
+        ObjectiveC.SendVoid(window, ObjectiveC.Sel("setReleasedWhenClosed:"), (byte)0);
         var webView = ObjectiveC.SendRect(ObjectiveC.Send(ObjectiveC.Class("WKWebView"), ObjectiveC.Sel("alloc")),
             ObjectiveC.Sel("initWithFrame:configuration:"), rect, configuration);
         if (webView == 0) throw new InvalidOperationException("WKWebView creation failed.");
@@ -406,15 +413,19 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
 
     private void CancelExit()
     {
+        var wasExiting = exiting;
         exiting = false;
         exitCompletion = null;
-        foreach (var open in windows.Values)
+        // Only the closes this exit started are abandoned; a window's own pending close stays in flight.
+        foreach (var open in windows.Values.Where(value => exitWindows.Contains(value.Window)))
         {
             open.ClosePending = false;
             open.CloseTimeout?.Cancel();
             open.CloseTimeout?.Dispose();
             open.CloseTimeout = null;
         }
+        exitWindows.Clear();
+        if (wasExiting) ExitCancelled?.Invoke();
     }
 
     private void Closed(nint window)
@@ -482,14 +493,14 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
         foreach (var state in windows.Values) Evaluate(state, $"window.__mdviewDispatch({json})");
     }
 
-    private nint Decide(nint webView, nint action)
+    private nint Decide(nint webView, nint action, bool trackNavigation = true)
     {
         var request = ObjectiveC.Send(action, ObjectiveC.Sel("request"));
         var text = ObjectiveC.GetString(ObjectiveC.Send(ObjectiveC.Send(request, ObjectiveC.Sel("URL")), ObjectiveC.Sel("absoluteString"))) ?? string.Empty;
         var decision = NavigationDecision.Decide(text, Origin);
         if (decision.Action == NavigationAction.Allow)
         {
-            TrackAllowedNavigation(webView, text);
+            if (trackNavigation) TrackAllowedNavigation(webView, text);
             return 1;
         }
         if (decision.Action == NavigationAction.OpenDocument && decision.Target is not null)
@@ -640,7 +651,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     }
     [UnmanagedCallersOnly] private static nint CreateWebView(nint self, nint cmd, nint webView, nint config, nint action, nint features)
     {
-        try { if (Owner(self) is { } owner) _ = owner.Decide(webView, action); }
+        try { if (Owner(self) is { } owner) _ = owner.Decide(webView, action, trackNavigation: false); }
         catch (Exception exception) { MacApplication.Report(exception.Message); }
         return 0;
     }

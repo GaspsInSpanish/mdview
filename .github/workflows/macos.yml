@@ -42,6 +42,8 @@ jobs:
         run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/smoke-app/mdview.app" direct
       - name: Smoke signed app (Apple Event openURLs)
         run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/smoke-app/mdview.app" open
+      - name: Smoke signed app (two windows, zombies on)
+        run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/smoke-app/mdview.app" two
       - name: Start shipped app
         run: bash tools/MacSmoke/startup.sh "$RUNNER_TEMP/dist-app/mdview.app"
       - name: Crash reports

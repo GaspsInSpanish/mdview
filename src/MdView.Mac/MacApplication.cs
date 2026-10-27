@@ -58,8 +58,12 @@ internal static unsafe class MacApplication
             receivedOpen = true;
             if (!lifecycle.TryLaunch(host.RegisterDocument(initialPath))) return 1;
         }
+        launcher.ExitCancelled += () => ReplyToTermination(false);
         _ = lifecycle.Completion.ContinueWith(_ =>
-            mainContext?.Post(_ => ObjectiveC.SendVoid(application, ObjectiveC.Sel("terminate:"), application), null),
+            mainContext?.Post(_ =>
+            {
+                if (!ReplyToTermination(true)) ObjectiveC.SendVoid(application, ObjectiveC.Sel("terminate:"), application);
+            }, null),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
         }
         finally { ObjectiveC.objc_autoreleasePoolPop(setupPool); }
@@ -190,16 +194,36 @@ internal static unsafe class MacApplication
     [UnmanagedCallersOnly]
     private static byte ShouldTerminateAfterLastWindow(nint self, nint command, nint sender) => 0;
 
+    // NSApplicationTerminateReply: Cancel 0, Now 1, Later 2.
+    private static bool terminationReplyPending;
+
+    /// <summary>Answers a deferred applicationShouldTerminate:, if one is waiting. Returns whether one was.</summary>
+    private static bool ReplyToTermination(bool terminate)
+    {
+        if (!terminationReplyPending) return false;
+        terminationReplyPending = false;
+        ObjectiveC.SendVoid(application, ObjectiveC.Sel("replyToApplicationShouldTerminate:"), (byte)(terminate ? 1 : 0));
+        return true;
+    }
+
     [UnmanagedCallersOnly]
     private static nint ShouldTerminate(nint self, nint command, nint sender)
     {
         try
         {
             if (lifecycle?.Completion.IsCompleted == true) return 1;
+            // Later, not Cancel: a system logout or restart then waits for the unsaved-edits prompts
+            // instead of being aborted by mdview even when nothing is dirty.
+            terminationReplyPending = true;
             launcher?.RequestExit(() => lifecycle?.Shutdown());
+            return 2;
         }
-        catch (Exception exception) { ShowWarning(exception.Message); }
-        return 0;
+        catch (Exception exception)
+        {
+            terminationReplyPending = false;
+            ShowWarning(exception.Message);
+            return 0;
+        }
     }
 
     [UnmanagedCallersOnly]
