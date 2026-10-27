@@ -173,6 +173,10 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
                 throw new InvalidOperationException("WebKit supplied an invalid request URL.");
             var headers = ObjectiveC.Send(request, ObjectiveC.Sel("allHTTPHeaderFields"));
             var origin = headers == 0 ? null : ObjectiveC.GetString(ObjectiveC.Send(headers, ObjectiveC.Sel("objectForKey:"), ObjectiveC.String("Origin")));
+            // WebKit sends no Origin header on custom-scheme requests (measured on macos-14). The origin
+            // of the request's main document is set by WebKit, not by page script, so it stands in for
+            // the header. Missing or foreign stays null, and DocumentHost refuses the write as before.
+            origin ??= DocumentOrigin(ObjectiveC.Send(request, ObjectiveC.Sel("mainDocumentURL")));
             var data = ObjectiveC.Send(request, ObjectiveC.Sel("HTTPBody"));
             var body = data != 0 ? Bytes(data) : ReadStreamCapped(ObjectiveC.Send(request, ObjectiveC.Sel("HTTPBodyStream")),
                 DocumentHost.MaximumBodyBytes(uri.AbsolutePath));
@@ -217,6 +221,16 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
     }
 
     private static bool IsStopped(nint task) => StoppedTasks.ContainsKey(task);
+
+    private static string? DocumentOrigin(nint url)
+    {
+        if (url == 0) return null;
+        var text = ObjectiveC.GetString(ObjectiveC.Send(url, ObjectiveC.Sel("absoluteString")));
+        return text is not null && Uri.TryCreate(text, UriKind.Absolute, out var uri) &&
+            uri.Scheme == "mdview" && uri.Host == "app" && uri.IsDefaultPort && string.IsNullOrEmpty(uri.UserInfo)
+            ? Origin
+            : null;
+    }
 
     private static void FailSchemeTask(nint task, string message)
     {
