@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using MdView.Serving;
@@ -12,11 +13,17 @@ public static class HandOffPipeName
 {
     public static string Current()
     {
-        var user = OperatingSystem.IsWindows()
-            ? WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName
-            : Environment.UserName;
+        var session = Process.GetCurrentProcess().SessionId;
+        if (!OperatingSystem.IsWindows())
+        {
+            // On Unix the pipe is a domain socket at $TMPDIR/CoreFxPipe_<name>, and macOS caps that path at
+            // 104 bytes with a TMPDIR of ~50. A user name has no fixed length, so it is hashed to a fixed one.
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(Environment.UserName));
+            return $"mdview-{session}-{Convert.ToHexString(hash, 0, 8).ToLowerInvariant()}";
+        }
+        var user = WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName;
         var safeUser = string.Concat(user.Select(character => char.IsLetterOrDigit(character) ? character : '-'));
-        return $"mdview-{Process.GetCurrentProcess().SessionId}-{safeUser}";
+        return $"mdview-{session}-{safeUser}";
     }
 }
 

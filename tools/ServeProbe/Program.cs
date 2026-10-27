@@ -455,6 +455,20 @@ static async Task<int> RunFileChecksAsync()
 static async Task<int> RunHandOffChecksAsync()
 {
     var failed = false;
+    failed |= !await RunCheckAsync("handoff-pipe-name-fits-socket-path", () =>
+    {
+        // macOS caps a domain-socket path at 104 bytes (sun_path), and .NET puts the pipe at
+        // $TMPDIR/CoreFxPipe_<name>. A long user name must not push the real name past it.
+        var name = HandOffPipeName.Current();
+        if (!OperatingSystem.IsWindows())
+        {
+            Ensure(!name.Contains(Environment.UserName, StringComparison.Ordinal) || Environment.UserName.Length < 4,
+                $"The pipe name {name} embeds the user name, so its length is unbounded.");
+            var socketPath = Path.Combine(Path.GetTempPath(), "CoreFxPipe_" + name);
+            Ensure(Encoding.UTF8.GetByteCount(socketPath) <= 103, $"The socket path is {socketPath.Length} bytes: {socketPath}");
+        }
+        return Task.CompletedTask;
+    });
     failed |= !await RunCheckAsync("handoff-valid-and-rejections", CheckHandOffValidationAsync);
     failed |= !await RunCheckAsync("handoff-oversize-unread", CheckHandOffOversizeAsync);
     failed |= !await RunCheckAsync("handoff-truncated-loop-survives", CheckHandOffTruncatedAsync);
@@ -477,7 +491,7 @@ static async Task CheckHandOffConcurrencyAsync()
         using var host = new DocumentHost(() => DocumentHost.Origin);
         var opened = new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
         host.DocumentOpened += document => opened.AddOrUpdate(document.Path, 1, (_, count) => count + 1);
-        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        var pipeName = $"mdview-p-{Guid.NewGuid():N}"[..21];
         using var server = new HandOffPipeServer(host, pipeName);
         var results = await Task.WhenAll(paths.Select(path => HandOffPipeClient.TrySendAsync(path, pipeName,
             TimeSpan.FromSeconds(2))));
@@ -505,7 +519,7 @@ static async Task CheckHandOffCreationRetryAsync()
             return new NamedPipeServerStream(name, PipeDirection.InOut,
                 NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte, options);
         }
-        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        var pipeName = $"mdview-p-{Guid.NewGuid():N}"[..21];
         var reports = 0;
         using var server = new HandOffPipeServer(host, pipeName, pipeFactory: Factory,
             reportError: _ => Interlocked.Increment(ref reports));
@@ -524,7 +538,7 @@ static async Task CheckHandOffPersistentFailureAsync()
     using var host = new DocumentHost(() => DocumentHost.Origin);
     var reports = 0;
     NamedPipeServerStream AlwaysFails(string name, PipeOptions options) => throw new IOException("injected outage");
-    using var server = new HandOffPipeServer(host, $"mdview-probe-{Guid.NewGuid():N}", pipeFactory: AlwaysFails,
+    using var server = new HandOffPipeServer(host, $"mdview-p-{Guid.NewGuid():N}"[..21], pipeFactory: AlwaysFails,
         reportError: _ => Interlocked.Increment(ref reports));
     await Task.Delay(TimeSpan.FromSeconds(2));
     Ensure(reports == 0, "An outage was reported after 2 s, before it could be told apart from a routine blip.");
@@ -544,7 +558,7 @@ static async Task CheckHandOffValidationAsync()
         using var host = new DocumentHost(() => DocumentHost.Origin);
         var opened = new TaskCompletionSource<RegisteredDocument>(TaskCreationOptions.RunContinuationsAsynchronously);
         host.DocumentOpened += document => opened.TrySetResult(document);
-        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        var pipeName = $"mdview-p-{Guid.NewGuid():N}"[..21];
         using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromMilliseconds(400));
         Ensure(await HandOffPipeClient.TrySendAsync(path, pipeName), "A valid path was rejected.");
         Ensure((await opened.Task.WaitAsync(TimeSpan.FromSeconds(1))).Path == path, "DocumentOpened had the wrong path.");
@@ -558,7 +572,7 @@ static async Task CheckHandOffValidationAsync()
 static async Task CheckHandOffOversizeAsync()
 {
     using var host = new DocumentHost(() => DocumentHost.Origin);
-    var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+    var pipeName = $"mdview-p-{Guid.NewGuid():N}"[..21];
     using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromSeconds(2));
     using var client = await ConnectPipeAsync(pipeName);
     var header = new byte[4];
@@ -577,7 +591,7 @@ static async Task CheckHandOffTruncatedAsync()
         var path = Path.Combine(directory, "valid.md");
         await File.WriteAllTextAsync(path, "# valid\n");
         using var host = new DocumentHost(() => DocumentHost.Origin);
-        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        var pipeName = $"mdview-p-{Guid.NewGuid():N}"[..21];
         using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromMilliseconds(300));
         using (var client = await ConnectPipeAsync(pipeName))
         {
@@ -600,7 +614,7 @@ static async Task CheckHandOffSlowAsync()
         var path = Path.Combine(directory, "valid.md");
         await File.WriteAllTextAsync(path, "# valid\n");
         using var host = new DocumentHost(() => DocumentHost.Origin);
-        var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+        var pipeName = $"mdview-p-{Guid.NewGuid():N}"[..21];
         using var server = new HandOffPipeServer(host, pipeName, TimeSpan.FromMilliseconds(200));
         using var slow = await ConnectPipeAsync(pipeName);
         await Task.Delay(350);
@@ -1513,7 +1527,7 @@ static async Task CheckInFlightHandOffAtShutdownAsync(string path)
     var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     var pipeFailure = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
     Lifecycle? lifecycle = null;
-    var pipeName = $"mdview-probe-{Guid.NewGuid():N}";
+    var pipeName = $"mdview-p-{Guid.NewGuid():N}"[..21];
     var server = new HandOffPipeServer(host, pipeName, accept: document =>
     {
         entered.TrySetResult();
@@ -1824,7 +1838,7 @@ static async Task CheckDocumentOpenDuringGraceAsync(string path)
 
 static Fixture StartFixture(string path, TimeSpan grace, TimeSpan startup)
 {
-    var stateDirectory = Path.Combine(Path.GetTempPath(), $"mdview-probe-{Guid.NewGuid():N}");
+    var stateDirectory = Path.Combine(Path.GetTempPath(), $"mdview-p-{Guid.NewGuid():N}"[..21]);
     var coordinator = new InstanceCoordinator(stateDirectory);
     if (!coordinator.IsPrimary)
     {
