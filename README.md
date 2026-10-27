@@ -18,6 +18,21 @@ Upgrading: close every mdview window first (and end any leftover `mdview.exe` in
 Manager), then run the new installer. Only one mdview runs at a time, so a copy that is
 still running will keep opening your files.
 
+## macOS
+
+Download the macOS `.dmg` from GitHub Releases: choose `arm64` for an Apple silicon Mac
+or `x64` for an Intel Mac. Open it and drag **mdview** to **Applications**.
+
+The app is ad-hoc signed but not notarized, so macOS blocks the first normal open. In
+Finder, right-click mdview and choose **Open**, then confirm. Alternatively, after the
+blocked attempt use **System Settings → Privacy & Security → Open Anyway** (macOS 15 or
+later). A managed work Mac may forbid unnotarized apps entirely; that is the
+organisation's security decision and mdview does not work around it.
+
+To make mdview the default for Markdown, select a `.md` file in Finder, choose **Get
+Info → Open with → mdview → Change All**. Mac shortcuts use Command (⌘), such as ⌘F,
+⌘E, and ⌘S.
+
 ## Requirements
 
 mdview draws its window with Microsoft **WebView2**, which comes with Windows 11 and is

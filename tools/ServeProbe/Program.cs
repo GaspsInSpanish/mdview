@@ -96,6 +96,9 @@ static async Task<int> RunFrameChecksAsync()
     failed |= !await RunCheckAsync("frame-message-validation", () =>
     {
         const string origin = "https://mdview.example";
+        const string macOrigin = "mdview://app";
+        Ensure(NavigationDecision.Decide(macOrigin + "/d/test", macOrigin).Action == NavigationAction.Allow,
+            "The custom Mac origin was not classified as same-origin navigation.");
         foreach (var command in new[] { "minimize", "maximize", "restore", "close" })
             Ensure(WindowFrameProtocol.Parse(origin + "/d/x", JsonSerializer.Serialize(new { type = "window", command }), origin).Kind == FrameMessageKind.WindowCommand,
                 $"Window command {command} was rejected.");

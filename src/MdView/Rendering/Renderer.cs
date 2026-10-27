@@ -35,7 +35,8 @@ public static class Renderer
 
     /// <summary>Renders a supported document format as a complete, self-contained HTML5 document.</summary>
     public static string RenderDocument(DocumentKind kind, string document, string title, string documentId = "", string writeToken = "",
-        string? cspNonce = null, ThemePreference theme = ThemePreference.System, string sourceHash = "")
+        string? cspNonce = null, ThemePreference theme = ThemePreference.System, string sourceHash = "",
+        bool appendTitleBar = true, string? platform = null)
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(title);
@@ -46,6 +47,8 @@ public static class Renderer
         var html = new StringBuilder();
         html.AppendLine("<!doctype html>");
         html.Append("<html lang=\"en\"");
+        if (!string.IsNullOrEmpty(platform))
+            html.Append(" data-platform=\"").Append(HtmlEncoder.Default.Encode(platform)).Append('"');
         if (theme is not ThemePreference.System)
             html.Append(" data-theme=\"").Append(ThemeConfigStore.ToWireValue(theme)).Append('"');
         html.AppendLine(">");
@@ -59,8 +62,8 @@ public static class Renderer
         html.AppendLine("</style>");
         html.AppendLine("</head>");
         html.AppendLine("<body tabindex=\"-1\">");
-        AppendTitleBar(html, title);
-        AppendMenuBar(html, theme);
+        if (appendTitleBar) AppendTitleBar(html, title);
+        AppendMenuBar(html, theme, platform);
         AppendFindBar(html);
         html.AppendLine("<main id=\"reader-content\" tabindex=\"-1\">");
         html.Append(body);
@@ -102,20 +105,22 @@ public static class Renderer
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported document kind.")
     };
 
-    private static void AppendMenuBar(StringBuilder html, ThemePreference theme)
+    private static void AppendMenuBar(StringBuilder html, ThemePreference theme, string? platform)
     {
+        var mac = string.Equals(platform, "mac", StringComparison.Ordinal);
         html.AppendLine("<nav class=\"menu-bar\" role=\"menubar\" aria-label=\"Application menu\">");
         AppendMenu(html, "file", "File",
-            [("New", "Ctrl+N", "file.new"), ("Open…", "Ctrl+O", "file.open"), ("Save", "Ctrl+S", "file.save"),
-             ("Save As…", "Ctrl+Shift+S", "file.save-as"), ("Exit", "Alt+F4", "file.exit")], 4);
+            [("New", mac ? "⌘N" : "Ctrl+N", "file.new"), ("Open…", mac ? "⌘O" : "Ctrl+O", "file.open"), ("Save", mac ? "⌘S" : "Ctrl+S", "file.save"),
+             ("Save As…", mac ? "⇧⌘S" : "Ctrl+Shift+S", "file.save-as"), ("Exit", mac ? "⌘Q" : "Alt+F4", "file.exit")], 4);
         AppendMenu(html, "edit", "Edit",
-            [("Copy", "Ctrl+C", "edit.copy"), ("Select All", "Ctrl+A", "edit.select-all"),
-             ("Find…", "Ctrl+F", "edit.find")]);
+            [("Copy", mac ? "⌘C" : "Ctrl+C", "edit.copy"), ("Select All", mac ? "⌘A" : "Ctrl+A", "edit.select-all"),
+             ("Find…", mac ? "⌘F" : "Ctrl+F", "edit.find")]);
         AppendMenu(html, "view", "View",
             [("Collapse All", "", "view.collapse-all"), ("Expand All", "", "view.expand-all")]);
         AppendThemeMenu(html, theme);
         // The edit lock. Locked is the default on every page load; edit.js flips it.
-        html.AppendLine("<button class=\"edit-lock\" type=\"button\" role=\"menuitemcheckbox\" aria-checked=\"false\" title=\"Unlock to edit this file (Ctrl+E)\">Locked</button>");
+        html.Append("<button class=\"edit-lock\" type=\"button\" role=\"menuitemcheckbox\" aria-checked=\"false\" title=\"Unlock to edit this file (")
+            .Append(mac ? "⌘E" : "Ctrl+E").AppendLine(")\">Locked</button>");
         html.AppendLine("</nav>");
     }
 

@@ -178,6 +178,7 @@ association, single-instance forwarding, and uninstall cleanliness.
 | 2026-09-27 | **Edit mode behind a lock**, reversing "no general editing" (owner request) | The owner chose "type in the rendered view" over a raw-source editor, then, shown the two ways to build that, chose **reveal-source-in-place** over true WYSIWYG. WYSIWYG would convert edited HTML back into Markdown, reformatting each touched block (`*a*` → `_a_`, joined lines) and needing a new dependency. Revealing the clicked block's own source keeps the file byte-exact outside what was typed, and works for every block kind, tables and code included. Explicit Ctrl+S over autosave (owner choice). Locked by default so reading is unchanged. Threat model unchanged in kind (already read-write since v1.1); the new endpoints sit behind the same token + `Origin` gate. |
 | 2026-09-28 | Browser fallback **Brave → Chrome → Edge → default browser** (owner request) | Previously anything but Brave got a plain browser tab. All three are Chromium and take `--app=`. Each browser is searched completely (App Paths, then every install root) before the next, so a per-user Brave still beats a system Chrome. Since Edge ships with Windows 10/11, the default-browser path is now practically unreachable. Config gains `browserPath`; `bravePath` still works. |
 | 2026-09-28 | **v2 becomes a native Windows app with an embedded WebView2**, reversing "Brave `--app=` over embedded WebView2" (2026-09-15); full Win98 frame, title bar included (owner decisions) | Fully native rendering was rejected as a rewrite of every page-layer feature and probe for worse typography. WebView2 keeps the page layer and its tests, and deletes the loopback server and its security surface. The owner chose the custom Win98 title bar over keeping Windows' own frame, accepting the loss of the snap-layout flyout and taking on drag/resize/maximize/DPI verification. Plan in §5b. |
+| 2026-10-27 | **macOS port**: a separate `src/MdView.Mac` host using WKWebView over raw Objective-C interop, a native Mac title bar, ad-hoc signed `.dmg` per architecture, verified on GitHub `macos-14` runners (owner decisions) | Plain `net8.0` with no new dependency keeps WSL builds and the two-dependency rule. The `net8.0-macos` workload needs Xcode and a Mac to build. A separate project leaves the shipped Windows exe untouched. CI runners are the only Mac this project can test on. Plan in §5c. |
 | 2026-09-15 | v1 ships `.md` only; more formats post-v1 | User decision. A `DocumentKind` seam goes in at S2 so later formats are an addition, not a refactor of the registry/server/installer together |
 
 ---
@@ -401,6 +402,50 @@ the look by hand; the page scrollbar running beside the title bar was raised and
 Each packet ships as its own release, so a regression is always one step back.
 Everything in the "No" column gets a precise click-list for the owner, per
 `docs/MANUAL_REVIEW.md`.
+
+## 5c. macOS port (planned 2026-10-27)
+
+**Goal (owner):** the existing app, ported to macOS and published on GitHub Releases, so
+the owner can use it on their (government-managed) Mac. Owner choices: **native macOS
+host**, **native Mac title bar** (no Win98 frame on Mac), **unsigned** (ad-hoc signed
+only). Whether a managed Mac allows an ad-hoc-signed download to run is the agency IT's
+call. The project does not work around it.
+
+**Route.** A second app project, `src/MdView.Mac` (`net8.0`, `osx-arm64` and `osx-x64`),
+links the portable source exactly as `tools/ServeProbe` already does (Rendering, Serving,
+`Lifecycle`, `InstanceCoordinator`, `HandOffPipe`, `WindowFrameProtocol`, the launcher
+interfaces), plus a Mac host:
+- NSApplication/NSWindow/**WKWebView** via raw Objective-C runtime interop (`libobjc`
+  `objc_msgSend`, runtime-created classes with `[UnmanagedCallersOnly]` methods). No new
+  NuGet, and **no `net8.0-macos` workload**: that workload builds only on a Mac with Xcode,
+  and plain `net8.0` keeps `dotnet build` working from WSL.
+- Pages are answered in-process by a **`WKURLSchemeHandler`** on a private custom scheme
+  (`mdview://app`), because WKWebView refuses handlers for `http`/`https`. Same
+  `InProcessRequestAdapter`/`DocumentHost`, same CSP, same Origin and token checks.
+- Page↔host: an injected document-start user script provides `window.chrome.webview`
+  (`postMessage` to a `WKScriptMessageHandler`, `message` events from
+  `evaluateJavaScript`), so the page JS stays one codebase.
+- Files opened from Finder arrive as `application:openURLs:` in the **running** process.
+  A second process (e.g. launched from Terminal) still hands off over the existing
+  current-user-only pipe (on Unix .NET implements it as a Unix-domain socket in the
+  user's temp dir; no network listener).
+- A native main menu (app menu with Quit, Edit with Cut/Copy/Paste/Select All/Undo) is
+  **required**, not cosmetic: without one, ⌘C/⌘V do nothing in a WKWebView.
+- The page keeps its in-page menu bar. Page shortcuts accept ⌘ on Mac.
+
+**Shared-code changes (kept minimal; Windows behaviour unchanged):** the renderer can omit
+the in-page title bar and tags the page with a platform. `Lifecycle` takes the origin
+instead of hard-coding `DocumentHost.Origin`. Page JS treats ⌘ as the control modifier
+when the page is tagged Mac.
+
+**Verification.** The Mac binary cannot run in WSL. GitHub's `macos-14` (arm64) runners
+can, with a GUI session, so CI is the Mac test bench: build, ad-hoc `codesign`, launch the
+real `.app`, and run checks against it, then package a `.dmg` per architecture. The
+owner's hands verify the rest (Finder double-click, Gatekeeper prompt, typing, ⌘ shortcuts).
+
+| # | Scope | Risk |
+|---|---|---|
+| M1 | Mac host + shared-code changes + `.app`/`.dmg` packaging + CI build-and-smoke job + release job assets | **High** (new native host, security-sensitive transport, process lifecycle) |
 
 ## 6. Roadmap — post-v1
 

@@ -1,0 +1,43 @@
+name: macOS
+
+on:
+  push:
+    branches: [main, mac-port]
+    paths: ['src/**', 'packaging/**', 'tools/MacSmoke/**', '.github/workflows/macos.yml']
+  workflow_dispatch:
+
+jobs:
+  build-smoke:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet build src/MdView/MdView.csproj -c Release
+      - run: dotnet build src/MdView.Mac/MdView.Mac.csproj -c Release -warnaserror
+      - run: dotnet run --project tools/RenderProbe/RenderProbe.csproj -c Release -- README.md "$RUNNER_TEMP/render.html"
+      - name: Run ServeProbe suites
+        run: |
+          set -euo pipefail
+          for suite in toggle security theme files handoff browser edit transport placement frame; do
+            dotnet run --project tools/ServeProbe/ServeProbe.csproj -c Release -- "--$suite"
+          done
+          dotnet run --project tools/ServeProbe/ServeProbe.csproj -c Release -- --lifecycle README.md
+      - name: Build signed app and dmg
+        run: bash packaging/macos/build-app.sh osx-arm64 0.0.0-ci "$RUNNER_TEMP/dist"
+      - name: Extract signed app
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dist-app"
+          hdiutil attach "$RUNNER_TEMP/dist/mdview-0.0.0-ci-macos-arm64.dmg" -mountpoint "$RUNNER_TEMP/mount" -nobrowse
+          cp -R "$RUNNER_TEMP/mount/mdview.app" "$RUNNER_TEMP/dist-app/mdview.app"
+          hdiutil detach "$RUNNER_TEMP/mount"
+      - name: Smoke signed app (command line)
+        run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/dist-app/mdview.app" direct
+      - name: Smoke signed app (Apple Event openURLs)
+        run: bash tools/MacSmoke/smoke.sh "$RUNNER_TEMP/dist-app/mdview.app" open
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mdview-macos-arm64
+          path: ${{ runner.temp }}/dist/*.dmg

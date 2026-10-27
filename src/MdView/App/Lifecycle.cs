@@ -12,6 +12,7 @@ public sealed class Lifecycle : IDisposable
     private readonly TimeSpan gracePeriod;
     private readonly TimeSpan startupTimeout;
     private readonly Action<string>? reportMessage;
+    private readonly string documentOrigin;
     private readonly object gate = new();
     private readonly TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Dictionary<LaunchTicket, CancellationTokenSource> pendingLaunches = [];
@@ -31,7 +32,8 @@ public sealed class Lifecycle : IDisposable
         IBrowserLauncher browserLauncher,
         TimeSpan? gracePeriod = null,
         TimeSpan? startupTimeout = null,
-        Action<string>? reportMessage = null)
+        Action<string>? reportMessage = null,
+        string documentOrigin = DocumentHost.Origin)
     {
         this.host = host;
         this.handOffServer = handOffServer;
@@ -41,6 +43,7 @@ public sealed class Lifecycle : IDisposable
         this.gracePeriod = gracePeriod ?? TimeSpan.Zero;
         this.startupTimeout = startupTimeout ?? TimeSpan.FromSeconds(30);
         this.reportMessage = reportMessage;
+        this.documentOrigin = documentOrigin.TrimEnd('/');
 
         signals.ClientConnected += OnClientConnected;
         signals.ClientDisconnected += OnClientDisconnected;
@@ -133,7 +136,7 @@ public sealed class Lifecycle : IDisposable
         reportMessage?.Invoke($"mdview could not {operation}: {exception.Message}");
 
     private string DocumentUrl(RegisteredDocument document) =>
-        $"{DocumentHost.Origin}/d/{Uri.EscapeDataString(document.Id)}";
+        $"{documentOrigin}/d/{Uri.EscapeDataString(document.Id)}";
 
     private void OnExitRequested() => browserLauncher.RequestExit(Shutdown);
 

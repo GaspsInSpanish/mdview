@@ -13,6 +13,7 @@ var title = Path.GetFileNameWithoutExtension(args[0]);
 var document = Renderer.RenderDocument(markdown, title);
 ValidateMenuShell(document);
 ValidateTitleBar();
+ValidateMacShell();
 ValidateEditFeatures(document);
 ValidateThemeRendering(markdown, title);
 ValidateAlerts();
@@ -28,6 +29,7 @@ Console.WriteLine("render-alerts=passed");
 Console.WriteLine("render-frontmatter=passed");
 Console.WriteLine("render-extensions=passed");
 Console.WriteLine("render-source-ranges=passed");
+Console.WriteLine("render-mac-shell=passed");
 return 0;
 
 static void ValidateTitleBar()
@@ -52,6 +54,20 @@ static void ValidateTitleBar()
     var start = html.IndexOf("<main id=\"reader-content\"", StringComparison.Ordinal);
     var end = html.IndexOf("</main>", start, StringComparison.Ordinal);
     Ensure(!html[start..end].Contains("title-bar", StringComparison.Ordinal), "Application chrome appeared inside reader content.");
+}
+
+static void ValidateMacShell()
+{
+    var html = Renderer.RenderDocument(DocumentKind.Markdown, "# Mac", "Mac", appendTitleBar: false, platform: "mac");
+    Ensure(html.Contains("<html lang=\"en\" data-platform=\"mac\">", StringComparison.Ordinal),
+        "Mac platform tag was missing.");
+    Ensure(!html.Contains("<header class=\"title-bar\"", StringComparison.Ordinal),
+        "Mac output retained the in-page title bar.");
+    foreach (var accelerator in new[] { "⌘N", "⌘O", "⌘S", "⇧⌘S", "⌘Q", "⌘C", "⌘A", "⌘F" })
+        Ensure(html.Contains($">{accelerator}<", StringComparison.Ordinal), $"Mac accelerator '{accelerator}' was missing.");
+    Ensure(Assets.LoadScript("menu.js").Contains("dataset.platform === 'mac'", StringComparison.Ordinal) &&
+        Assets.LoadScript("edit.js").Contains("dataset.platform === 'mac'", StringComparison.Ordinal),
+        "Page shortcuts did not select Command on Mac.");
 }
 
 static void ValidateMenuShell(string html)

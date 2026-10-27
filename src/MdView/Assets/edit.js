@@ -146,7 +146,10 @@
       updateChrome();
     });
     textarea.addEventListener('keydown', event => {
-      if (event.key === 'Escape' || (event.key === 'Enter' && event.ctrlKey)) {
+      const control = document.documentElement.dataset.platform === 'mac'
+        ? event.metaKey && !event.ctrlKey && !event.altKey
+        : event.ctrlKey && !event.altKey && !event.metaKey;
+      if (event.key === 'Escape' || (event.key === 'Enter' && control)) {
         event.preventDefault();
         enqueue(commit);
       } else if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.altKey) {
@@ -297,7 +300,9 @@
   });
 
   document.addEventListener('keydown', event => {
-    const control = event.ctrlKey && !event.altKey && !event.metaKey;
+    const control = document.documentElement.dataset.platform === 'mac'
+      ? event.metaKey && !event.ctrlKey && !event.altKey
+      : event.ctrlKey && !event.altKey && !event.metaKey;
     if (control && !event.shiftKey && event.key.toLowerCase() === 's') {
       // Also stops the browser's own "save page", which would save our rendered HTML.
       event.preventDefault();

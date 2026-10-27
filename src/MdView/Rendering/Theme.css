@@ -116,6 +116,8 @@ main {
   padding: 5.25rem 1.5rem 8rem;
 }
 
+:root[data-platform="mac"] main { padding-top: 4rem; }
+
 .title-bar {
   position: fixed;
   z-index: 1001;
@@ -200,6 +202,8 @@ main {
   font-size: 0.875rem;
   line-height: 1.25;
 }
+
+:root[data-platform="mac"] .menu-bar { top: 0; }
 
 .menu { position: relative; }
 
@@ -321,6 +325,8 @@ main {
   font-size: 0.875rem;
   line-height: 1.25;
 }
+
+:root[data-platform="mac"] .find-bar { top: 2.5rem; }
 
 .find-bar[hidden] { display: none; }
 

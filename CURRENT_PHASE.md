@@ -1,14 +1,10 @@
 # Current phase
 
-No active implementation packet. W4 (Win98 frame) completed 2026-10-11; **released as v1.6.0** (W3 + W4) on 2026-10-11, installer checksum verified
-Next is **W5** in
-`projectoutline.md` §5b: the installer checks for and bootstraps the WebView2 runtime, and the
-dormant browser-launch code (`BrowserLauncher`, `BrowserDiscovery`, `browserPath`/`bravePath`) is
-deleted.
+**M1-MAC** (2026-10-27): macOS port. Plan and constraints in `projectoutline.md` §5c.
+Separate `src/MdView.Mac` host (WKWebView over raw Objective-C interop), native Mac title
+bar, ad-hoc signed `.dmg` per architecture, built and smoke-tested on GitHub `macos-14`
+runners, published by the release workflow alongside the Windows installer.
 
-Windows acceptance: `tools/WindowsBlackBox/run.sh` (app black-box) and `run-probes.sh` (every
-ServeProbe suite natively on Windows). The owner must close their mdview first.
+W5 (WebView2 bootstrap in the installer) remains next for Windows after this.
 
-Hand checks in `docs/MANUAL_REVIEW.md` §9–10 (title-bar right-click menu, dragging a maximized window
-down to restore, resize flashes, taskbar on top/auto-hide, multi-monitor) **deferred by the owner on
-2026-10-11** — not done, not required for v1.6.0.
+Hand checks for v1.6 in `docs/MANUAL_REVIEW.md` §9–10 are still deferred by the owner (2026-10-11).

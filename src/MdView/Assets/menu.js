@@ -330,7 +330,8 @@
     else if (action === 'close') closeFind();
   });
   document.addEventListener('keydown', event => {
-    const control = event.ctrlKey && !event.altKey && !event.metaKey;
+    const mac = document.documentElement.dataset.platform === 'mac';
+    const control = mac ? event.metaKey && !event.ctrlKey && !event.altKey : event.ctrlKey && !event.altKey && !event.metaKey;
     // Typing in Find or in an edit-mode textarea keeps the native text shortcuts, and Alt
     // stays with the textarea so Windows Alt+numpad character entry still works.
     const editingText = event.target === findQuery || event.target.matches?.('textarea');

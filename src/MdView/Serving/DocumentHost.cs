@@ -32,6 +32,8 @@ public sealed class DocumentHost : IDisposable
     private readonly ThemeConfigStore themeConfig;
     private readonly IFileDialogProvider? fileDialogs;
     private readonly Func<string> expectedOrigin;
+    private readonly bool appendTitleBar;
+    private readonly string? platform;
     private readonly ConcurrentDictionary<string, Lazy<DocumentWatcher>> watchers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte[]> suppressedHashes = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource shutdown = new();
@@ -40,12 +42,15 @@ public sealed class DocumentHost : IDisposable
     private bool disposed;
 
     public DocumentHost(Func<string> expectedOrigin, DocumentRegistry? registry = null,
-        ThemeConfigStore? themeConfig = null, IFileDialogProvider? fileDialogs = null)
+        ThemeConfigStore? themeConfig = null, IFileDialogProvider? fileDialogs = null,
+        bool appendTitleBar = true, string? platform = null)
     {
         this.expectedOrigin = expectedOrigin ?? throw new ArgumentNullException(nameof(expectedOrigin));
         this.registry = registry ?? new DocumentRegistry();
         this.themeConfig = themeConfig ?? new ThemeConfigStore();
         this.fileDialogs = fileDialogs;
+        this.appendTitleBar = appendTitleBar;
+        this.platform = platform;
     }
 
     public event Action<RegisteredDocument>? DocumentOpened;
@@ -157,7 +162,7 @@ public sealed class DocumentHost : IDisposable
         var nonce = Renderer.CreateNonce();
         var csp = Renderer.CreateContentSecurityPolicy(nonce);
         var html = Renderer.RenderDocument(document.Kind, source.Text, document.Title, document.Id,
-            writeToken, nonce, themeConfig.ReadTheme(), source.Hash);
+            writeToken, nonce, themeConfig.ReadTheme(), source.Hash, appendTitleBar, platform);
         return new((int)HttpStatusCode.OK, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html),
             new Dictionary<string, string> { ["Content-Security-Policy"] = csp });
     }

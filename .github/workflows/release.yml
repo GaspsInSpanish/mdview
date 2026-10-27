@@ -2,8 +2,7 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
@@ -15,15 +14,13 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-
       - name: Derive version
         shell: pwsh
         run: |
@@ -31,11 +28,9 @@ jobs:
           $version = $tag -replace '^v', ''
           if ([string]::IsNullOrWhiteSpace($version)) { throw 'A release version is required.' }
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: Publish mdview
         shell: pwsh
         run: dotnet publish src/MdView/MdView.csproj -c Release -r win-x64 -p:Version=$env:VERSION
-
       - name: Ensure Inno Setup is available
         shell: pwsh
         run: |
@@ -47,21 +42,59 @@ jobs:
           $isccPath = if ($iscc) { $iscc.Source } else { "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
           if (-not (Test-Path $isccPath)) { throw 'Inno Setup could not be located after installation.' }
           "ISCC=$isccPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: Build installer
         shell: pwsh
         run: '& "$env:ISCC" "/DAppVersion=$env:VERSION" "installer\mdview.iss"'
-
       - name: Create checksum
         shell: pwsh
         run: |
           $installer = "installer\Output\mdview-setup-$env:VERSION.exe"
           $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           "$hash  $(Split-Path -Leaf $installer)" | Set-Content -NoNewline "${installer}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            installer/Output/mdview-setup-${{ env.VERSION }}.exe
+            installer/Output/mdview-setup-${{ env.VERSION }}.exe.sha256
 
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Derive version
+        run: |
+          set -euo pipefail
+          if [[ '${{ github.event_name }}' == workflow_dispatch ]]; then tag='${{ inputs.version }}'; else tag='${{ github.ref_name }}'; fi
+          version=${tag#v}; [[ -n "$version" ]]; echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Build Mac disk images
+        run: |
+          set -euo pipefail
+          packaging/macos/build-app.sh osx-arm64 "$VERSION" "$RUNNER_TEMP/release"
+          packaging/macos/build-app.sh osx-x64 "$VERSION" "$RUNNER_TEMP/release"
+          cd "$RUNNER_TEMP/release"
+          for file in *.dmg; do hash=$(shasum -a 256 "$file" | awk '{print $1}'); printf '%s  %s\n' "$hash" "$file" > "$file.sha256"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: ${{ runner.temp }}/release/*
+
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Derive version
+        run: |
+          if [[ '${{ github.event_name }}' == workflow_dispatch ]]; then tag='${{ inputs.version }}'; else tag='${{ github.ref_name }}'; fi
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
       - name: Create GitHub release
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "v$env:VERSION" "installer\Output\mdview-setup-$env:VERSION.exe" "installer\Output\mdview-setup-$env:VERSION.exe.sha256" --target "$env:GITHUB_SHA" --title "mdview $env:VERSION" --generate-notes
+        run: gh release create "v$VERSION" release-assets/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "mdview $VERSION" --generate-notes
