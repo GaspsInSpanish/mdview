@@ -40,5 +40,13 @@ codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 cp -R "$app" "$stage/mdview.app"
 ln -s /Applications "$stage/Applications"
-hdiutil create -volname mdview -srcfolder "$stage" -ov -format UDZO \
-  "$outdir/mdview-$version-macos-$architecture.dmg"
+# hdiutil's own size estimate for -srcfolder intermittently comes up short on CI runners
+# ("No space left on device"), so the image is sized explicitly and retried.
+size_mb=$(( $(du -sm "$stage" | cut -f1) + 32 ))
+dmg="$outdir/mdview-$version-macos-$architecture.dmg"
+for attempt in 1 2 3; do
+  if hdiutil create -volname mdview -srcfolder "$stage" -size "${size_mb}m" -ov -format UDZO "$dmg"; then break; fi
+  [[ $attempt -lt 3 ]] || { echo "hdiutil create failed after $attempt attempts" >&2; exit 1; }
+  sleep 5
+done
+hdiutil verify "$dmg"
