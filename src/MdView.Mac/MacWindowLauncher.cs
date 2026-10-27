@@ -128,6 +128,7 @@ internal sealed class MacWindowLauncher : IBrowserLauncher, ILifecycleSignals, I
             ObjectiveC.Sel("initWithContentRect:styleMask:backing:defer:"), rect, style, 2, 0);
         if (window == 0) throw new InvalidOperationException("NSWindow creation failed.");
         // Closed() releases the window itself; AppKit's default release-on-close would make that a double release.
+        ObjectiveC.SendVoid(window, ObjectiveC.Sel("setReleasedWhenClosed:"), (byte)0);
         var webView = ObjectiveC.SendRect(ObjectiveC.Send(ObjectiveC.Class("WKWebView"), ObjectiveC.Sel("alloc")),
             ObjectiveC.Sel("initWithFrame:configuration:"), rect, configuration);
         if (webView == 0) throw new InvalidOperationException("WKWebView creation failed.");

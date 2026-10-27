@@ -447,6 +447,44 @@ owner's hands verify the rest (Finder double-click, Gatekeeper prompt, typing, �
 |---|---|---|
 | M1 | Mac host + shared-code changes + `.app`/`.dmg` packaging + CI build-and-smoke job + release job assets | **High** (new native host, security-sensitive transport, process lifecycle) |
 
+**Measured on `macos-14` (2026-10-27), each one found by running the real app:**
+- **WebKit sends no `Origin` header on custom-scheme requests**, so every write was refused.
+  The host now takes the origin from the request's `mainDocumentURL`, which WebKit sets and
+  page script cannot. Only exactly `mdview://app` maps to the trusted origin; anything else
+  stays null and is refused. The premise is **no frames**: `mainDocumentURL` names the top
+  document, not the requester. CSP `default-src 'none'` and the sanitizer keep every frame
+  out. Anything that ever allows a frame must revisit this. The write token is still the
+  second gate on every write route.
+- **macOS caps a domain-socket path at 104 bytes** and `$TMPDIR` is about 50, so the
+  hand-off pipe name is hashed to a fixed length off Windows. The Windows name is unchanged.
+- **A socket file outlives a process that never disposed its server**, and
+  `FirstPipeInstance` then refuses the path on every later launch ("Access to the path is
+  denied"). The mutex holder deletes its own leftover first.
+- `objc_getProtocol` returns nil for `NSApplicationDelegate` and `WKScriptMessageHandler`.
+  Adopting a nil protocol segfaulted at launch. Registration now skips nil protocols, and
+  AppKit/WebKit call delegates by `respondsToSelector:` anyway.
+
+**CI smoke** (`tools/MacSmoke`, on a smoke build of the same commit; release builds carry no
+smoke code):
+- launched directly, and through `open -a`, which is the Apple-Event path a Finder
+  double-click takes;
+- a two-window run with the second window handed off over the pipe, under
+  `NSZombieEnabled`;
+- the shipped build is started and stopped.
+
+Each run asserts that the page rendered with no Win98 title bar, the bridge works, an
+`onerror` injection did not run, code is highlighted, a checkbox save reached the file on
+disk, a pushed reload happened, and the process exited 0 after its last window.
+
+**Not covered by CI, so these need hands on a Mac:**
+- the Gatekeeper first open, and Finder → Get Info → Open with;
+- typing in edit mode, ⌘ shortcuts, and the dirty-close and Quit prompts;
+- drag-to-open;
+- the **x64 build, which is built but never run** (the runners are arm64).
+
+A Mac packaging failure blocks the Windows release too, since one job publishes both.
+Tags must be numeric `x.y.z`.
+
 ## 6. Roadmap — post-v1
 
 **v1 = `.md` only.** Nothing below is in scope until v1 ships.

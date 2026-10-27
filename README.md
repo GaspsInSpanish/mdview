@@ -1,10 +1,10 @@
 # mdview
 
-mdview is a small Windows utility for reading Markdown. Double-click a `.md` file and it
+mdview is a small Windows and macOS utility for reading Markdown. Double-click a `.md` file and it
 opens in its own clean, Claude-artifact-style window that reloads by itself whenever the
 file changes on disk. When you want to change something, unlock the page and edit it in place.
 
-## Install
+## Install (Windows)
 
 1. Download `mdview-setup-<version>.exe` from
    [GitHub Releases](https://github.com/GaspsInSpanish/mdview/releases) and run it.
@@ -18,22 +18,28 @@ Upgrading: close every mdview window first (and end any leftover `mdview.exe` in
 Manager), then run the new installer. Only one mdview runs at a time, so a copy that is
 still running will keep opening your files.
 
-## macOS
+## Install (macOS)
 
 Download the macOS `.dmg` from GitHub Releases: choose `arm64` for an Apple silicon Mac
 or `x64` for an Intel Mac. Open it and drag **mdview** to **Applications**.
 
-The app is ad-hoc signed but not notarized, so macOS blocks the first normal open. In
-Finder, right-click mdview and choose **Open**, then confirm. Alternatively, after the
-blocked attempt use **System Settings → Privacy & Security → Open Anyway** (macOS 15 or
-later). A managed work Mac may forbid unnotarized apps entirely; that is the
-organisation's security decision and mdview does not work around it.
+The app is ad-hoc signed but not notarized, so macOS blocks the first open:
+
+- **macOS 15 (Sequoia) and later:** double-click mdview once and dismiss the warning, then
+  go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway**.
+- **macOS 12–14:** in Finder, right-click mdview, choose **Open**, then confirm.
+
+A managed work Mac may forbid apps that aren't notarized altogether. That is the
+organisation's security decision; check with your IT team, and mdview does not work
+around it.
+
+Requires macOS 12 or later. Nothing else to install: macOS supplies the web view.
 
 To make mdview the default for Markdown, select a `.md` file in Finder, choose **Get
 Info → Open with → mdview → Change All**. Mac shortcuts use Command (⌘), such as ⌘F,
 ⌘E, and ⌘S.
 
-## Requirements
+## Requirements (Windows)
 
 mdview draws its window with Microsoft **WebView2**, which comes with Windows 11 and is
 installed on most up-to-date Windows 10 PCs. Nothing else is needed: no browser opens.
